@@ -49,11 +49,23 @@ body {
 
 /* Card shadows */
 .card-shadow {
-  box-shadow: 0 4px 20px -2px rgba(48, 0, 159, 0.08), 0 2px 8px -1px rgba(48, 0, 159, 0.04);
+  box-shadow: 0 8px 30px rgba(48, 0, 159, 0.06), 0 2px 8px rgba(48, 0, 159, 0.04);
 }
 
-.glow-navy {
-  box-shadow: 0 0 15px rgba(48, 0, 159, 0.25);
+.glow-violet {
+  box-shadow: 0 10px 25px -5px rgba(48, 0, 159, 0.3), 0 8px 10px -6px rgba(48, 0, 159, 0.3);
+}
+
+/* Glassmorphism card */
+.glass-card {
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+/* Brand gradient background for phone screen */
+.phone-brand-bg {
+  background: linear-gradient(145deg, #FFCDF7 0%, #E3CDFF 45%, #FFFFFF 100%);
 }
 
 /* Scanning active animation */

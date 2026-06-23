@@ -7,7 +7,8 @@ import {
   createTransactionAction, 
   createPotAction, 
   topUpEMoneyAction, 
-  fetchEstatementAction 
+  fetchEstatementAction,
+  registerUserAction
 } from "@/app/actions";
 
 // Types
@@ -100,6 +101,19 @@ export default function Home() {
 
   // --- E-statement specific ---
   const [statementData, setStatementData] = useState<any | null>(null);
+
+  // --- Registration States for Buka Rekening ---
+  const [regStep, setRegStep] = useState<number>(1);
+  const [regInputs, setRegInputs] = useState({
+    name: "",
+    nik: "",
+    birthDate: "",
+    userId: "",
+    passcode: "",
+    pin: "",
+    initialDeposit: 100000
+  });
+  const [regResult, setRegResult] = useState<{ accountNo: string; userId: string } | null>(null);
 
   const playSound = (type: "click" | "success" | "error" | "biometric") => {
     if (!soundEnabled) return;
@@ -208,14 +222,20 @@ export default function Home() {
   // Sync Database user details
   const refreshUserData = async (userId: string) => {
     setIsLoading(true);
-    const res = await fetchUserDataAction(userId);
-    setIsLoading(false);
-    if (res.success) {
-      setBalance(res.balance || 0);
-      setTransactions(res.transactions || []);
-      setCentraPots(res.centraPots || []);
-    } else {
-      pushNotification(res.error || "Gagal menyinkronkan data database.");
+    try {
+      const res = await fetchUserDataAction(userId);
+      if (res.success) {
+        setBalance(res.balance || 0);
+        setTransactions(res.transactions || []);
+        setCentraPots(res.centraPots || []);
+      } else {
+        pushNotification(res.error || "Gagal menyinkronkan data database.");
+      }
+    } catch (err) {
+      console.error(err);
+      pushNotification("Gagal terhubung ke database. Cek konfigurasi server.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -230,25 +250,35 @@ export default function Home() {
     }
 
     setIsLoading(true);
-    const res = await loginAction(userIdInput, passcode);
-    setIsLoading(false);
-
-    if (res.success && res.user) {
-      setLoggedInUser(res.user);
-      // Force elderly mode if user age is 55+ or if already enabled
-      if (res.user.isElderly) {
-        setForceElderlyMode(true);
-        pushNotification(`Mengaktifkan Mode Lansia (Usia ${res.user.age} tahun)`);
+    try {
+      const res = await loginAction(userIdInput, passcode);
+      if (res.success && res.user) {
+        setLoggedInUser(res.user);
+        // Force elderly mode if user age is 55+ or if already enabled
+        if (res.user.isElderly) {
+          setForceElderlyMode(true);
+          pushNotification(`Mengaktifkan Mode Lansia (Usia ${res.user.age} tahun)`);
+        } else {
+          setForceElderlyMode(false);
+        }
+        
+        await refreshUserData(res.user.userId);
+        setCurrentScreen("dashboard");
+        pushNotification(`Selamat datang kembali, ${res.user.name}!`);
       } else {
-        setForceElderlyMode(false);
+        playSound("error");
+        if (res.error === "User ID tidak ditemukan") {
+          pushNotification("User ID tidak ditemukan. Jika belum memiliki rekening, silakan klik 'Buka Sekarang' di bawah.");
+        } else {
+          pushNotification(res.error || "Autentikasi gagal.");
+        }
       }
-      
-      await refreshUserData(res.user.userId);
-      setCurrentScreen("dashboard");
-      pushNotification(`Selamat datang kembali, ${res.user.name}!`);
-    } else {
+    } catch (err) {
+      console.error(err);
       playSound("error");
-      pushNotification(res.error || "Autentikasi gagal.");
+      pushNotification("Koneksi Neon Database terputus. Pastikan DATABASE_URL sudah dikonfigurasi di Vercel.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -293,36 +323,43 @@ export default function Home() {
     const totalDeduction = amount + fee;
 
     setIsLoading(true);
-    
-    // Call server action to apply transaction in PostgreSQL
-    const res = await createTransactionAction(loggedInUser.userId, {
-      id: pinPayload.id,
-      type: pinPayload.type,
-      title: pinPayload.title,
-      category: selectedCategory || "Transaksi",
-      amount: amount,
-      fee: fee,
-      note: pinPayload.note || "Transaksi M-Banking",
-      recipient: pinPayload.recipient,
-      bankName: pinPayload.bankName
-    });
-
-    if (res.success) {
-      await refreshUserData(loggedInUser.userId);
-      setLastTxResult({
-        ...pinPayload,
-        date: new Date().toISOString(),
-        total: totalDeduction
+    try {
+      // Call server action to apply transaction in PostgreSQL
+      const res = await createTransactionAction(loggedInUser.userId, {
+        id: pinPayload.id,
+        type: pinPayload.type,
+        title: pinPayload.title,
+        category: selectedCategory || "Transaksi",
+        amount: amount,
+        fee: fee,
+        note: pinPayload.note || "Transaksi M-Banking",
+        recipient: pinPayload.recipient,
+        bankName: pinPayload.bankName
       });
-      playSound("success");
-      setCurrentScreen("receipt");
-      pushNotification(`Transaksi ${pinPayload.title} berhasil!`);
-    } else {
+
+      if (res.success) {
+        await refreshUserData(loggedInUser.userId);
+        setLastTxResult({
+          ...pinPayload,
+          date: new Date().toISOString(),
+          total: totalDeduction
+        });
+        playSound("success");
+        setCurrentScreen("receipt");
+        pushNotification(`Transaksi ${pinPayload.title} berhasil!`);
+      } else {
+        playSound("error");
+        pushNotification(res.error || "Transaksi gagal di database.");
+        setCurrentScreen("dashboard");
+      }
+    } catch (err) {
+      console.error(err);
       playSound("error");
-      pushNotification(res.error || "Transaksi gagal di database.");
+      pushNotification("Gagal memproses transaksi. Koneksi database bermasalah.");
       setCurrentScreen("dashboard");
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   };
 
   // Simulated NFC reading for E-money
@@ -347,20 +384,26 @@ export default function Home() {
     if (!loggedInUser || !scannedCard) return;
 
     setIsLoading(true);
-    const res = await topUpEMoneyAction(loggedInUser.userId, amount, scannedCard.cardNo, scannedCard.type);
-    setIsLoading(false);
-
-    if (res.success) {
-      await refreshUserData(loggedInUser.userId);
-      setScannedCard((prev: any) => ({
-        ...prev,
-        balance: prev.balance + amount
-      }));
-      playSound("success");
-      pushNotification(`Top Up ${scannedCard.type} sebesar ${formatRupiah(amount)} berhasil!`);
-    } else {
+    try {
+      const res = await topUpEMoneyAction(loggedInUser.userId, amount, scannedCard.cardNo, scannedCard.type);
+      if (res.success) {
+        await refreshUserData(loggedInUser.userId);
+        setScannedCard((prev: any) => ({
+          ...prev,
+          balance: prev.balance + amount
+        }));
+        playSound("success");
+        pushNotification(`Top Up ${scannedCard.type} sebesar ${formatRupiah(amount)} berhasil!`);
+      } else {
+        playSound("error");
+        pushNotification(res.error || "Top up gagal.");
+      }
+    } catch (err) {
+      console.error(err);
       playSound("error");
-      pushNotification(res.error || "Top up gagal.");
+      pushNotification("Gagal memproses Top Up. Terjadi kesalahan jaringan.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -381,17 +424,23 @@ export default function Home() {
     };
 
     setIsLoading(true);
-    const res = await createPotAction(loggedInUser.userId, potData);
-    setIsLoading(false);
-
-    if (res.success) {
-      await refreshUserData(loggedInUser.userId);
-      setFormInputs({ showNewPotForm: false });
-      playSound("success");
-      pushNotification(`Pocket "${potData.title}" berhasil dibuat!`);
-    } else {
+    try {
+      const res = await createPotAction(loggedInUser.userId, potData);
+      if (res.success) {
+        await refreshUserData(loggedInUser.userId);
+        setFormInputs({ showNewPotForm: false });
+        playSound("success");
+        pushNotification(`Pocket "${potData.title}" berhasil dibuat!`);
+      } else {
+        playSound("error");
+        pushNotification(res.error || "Gagal membuat Pocket.");
+      }
+    } catch (err) {
+      console.error(err);
       playSound("error");
-      pushNotification(res.error || "Gagal membuat Pocket.");
+      pushNotification("Gagal membuat Pocket. Koneksi database gagal.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -400,21 +449,27 @@ export default function Home() {
     if (!loggedInUser) return;
 
     setIsLoading(true);
-    const res = await fetchEstatementAction(loggedInUser.userId, formInputs.month || "Juni 2026");
-    setIsLoading(false);
-
-    if (res.success && res.transactions) {
-      setStatementData({
-        month: formInputs.month || "Juni 2026",
-        transactions: res.transactions,
-        totalDebit: res.totalDebit,
-        totalCredit: res.totalCredit
-      });
-      playSound("success");
-      setCurrentScreen("estatement_view");
-    } else {
+    try {
+      const res = await fetchEstatementAction(loggedInUser.userId, formInputs.month || "Juni 2026");
+      if (res.success && res.transactions) {
+        setStatementData({
+          month: formInputs.month || "Juni 2026",
+          transactions: res.transactions,
+          totalDebit: res.totalDebit,
+          totalCredit: res.totalCredit
+        });
+        playSound("success");
+        setCurrentScreen("estatement_view");
+      } else {
+        playSound("error");
+        pushNotification("Gagal mengambil laporan E-statement.");
+      }
+    } catch (err) {
+      console.error(err);
       playSound("error");
-      pushNotification("Gagal mengambil laporan E-statement.");
+      pushNotification("Gagal mengambil E-statement. Masalah koneksi database.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -432,39 +487,14 @@ export default function Home() {
     });
   };
 
-  // --- SVG Logo Component (PT Centurion Bank Brand Navy) ---
+  // --- Centra Logo Component using Violet PNG Asset ---
   const CentraLogoNavy = ({ className = "w-16 h-16" }: { className?: string }) => (
-    <svg viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
-      <path 
-        d="M 142.4 57.6 A 60 60 0 1 0 142.4 142.4" 
-        stroke="#002060" 
-        strokeWidth="20" 
-        strokeLinecap="round" 
-        fill="none"
-      />
-      <circle 
-        cx="100" 
-        cy="100" 
-        r="17" 
-        stroke="#002060" 
-        strokeWidth="14" 
-        fill="none"
-      />
-      <path 
-        d="M 117 100 H 180" 
-        stroke="#002060" 
-        strokeWidth="14" 
-        strokeLinecap="round"
-      />
-      <rect 
-        x="152" 
-        y="100" 
-        width="18" 
-        height="18" 
-        fill="#002060" 
-        rx="2"
-      />
-    </svg>
+    <img 
+      src="/asset/logo-violet.png" 
+      alt="Centra Logo" 
+      className={className} 
+      style={{ objectFit: "contain" }}
+    />
   );
 
   return (
@@ -477,7 +507,7 @@ export default function Home() {
             <CentraLogoNavy className="w-6 h-6 shrink-0" />
             <div className="flex-1">
               <div className="flex justify-between items-baseline">
-                <span className="text-[11px] font-extrabold text-[#002060]">Centra Mobile</span>
+                <span className="text-[11px] font-extrabold text-[#30009F]">Centra Mobile</span>
                 <span className="text-[9px] text-slate-450">{notif.time}</span>
               </div>
               <p className="text-xs mt-1 text-slate-700 font-semibold leading-relaxed">{notif.text}</p>
@@ -525,8 +555,8 @@ export default function Home() {
           {/* Loading Indicator Spinner Overlay */}
           {isLoading && (
             <div className="absolute inset-0 bg-white/70 z-50 flex flex-col items-center justify-center space-y-3">
-              <div className="w-10 h-10 rounded-full border-4 border-[#002060] border-t-transparent animate-spin"></div>
-              <span className="text-xs font-bold text-[#002060] tracking-wide">Menghubungi Neon Database...</span>
+              <div className="w-10 h-10 rounded-full border-4 border-[#30009F] border-t-transparent animate-spin"></div>
+              <span className="text-xs font-bold text-[#30009F] tracking-wide">Menghubungi Neon Database...</span>
             </div>
           )}
 
@@ -535,94 +565,130 @@ export default function Home() {
             
             {/* 1. SPLASH SCREEN */}
             {currentScreen === "splash" && (
-              <div className="flex-1 flex flex-col items-center justify-center p-6 bg-white animate-fade-in text-center">
+              <div className="flex-1 flex flex-col items-center justify-center p-6 phone-brand-bg animate-fade-in text-center">
                 <div className="animate-pulse flex flex-col items-center gap-6">
-                  <CentraLogoNavy className="w-24 h-24" />
+                  <div className="w-24 h-24 p-3 bg-white/40 backdrop-blur-md rounded-[32px] border border-white/50 shadow-lg flex items-center justify-center">
+                    <CentraLogoNavy className="w-16 h-16" />
+                  </div>
                   <div>
-                    <h2 className="text-3xl font-black text-[#002060] tracking-wider">CENTRA</h2>
-                    <p className="text-[10px] font-extrabold tracking-widest text-[#002060]/75 uppercase mt-1">PT Centurion Bank Tbk.</p>
+                    <h2 className="text-4xl font-black text-[#30009F] tracking-widest font-sans">CENTRA</h2>
+                    <p className="text-[11px] font-black tracking-widest text-[#30009F]/70 uppercase mt-1.5">PT Centurion Bank Tbk.</p>
                   </div>
                 </div>
                 <div className="absolute bottom-20 flex flex-col items-center">
-                  <div className="w-6 h-6 rounded-full border-2 border-[#002060] border-t-transparent animate-spin"></div>
-                  <span className="text-[10px] tracking-widest text-slate-500 font-extrabold uppercase mt-4">Sistem Aman Terverifikasi</span>
+                  <div className="w-7 h-7 rounded-full border-3 border-[#30009F] border-t-transparent animate-spin"></div>
+                  <span className="text-[11px] tracking-widest text-[#30009F]/80 font-black uppercase mt-4">Sistem Aman Terverifikasi</span>
                 </div>
               </div>
             )}
 
             {/* 2. LOGIN SCREEN */}
             {currentScreen === "login" && (
-              <div className="flex-1 flex flex-col justify-between p-6 animate-fade-in">
-                <div className="flex justify-center items-center mt-6">
-                  <div className="flex flex-col items-center gap-2">
-                    <CentraLogoNavy className="w-16 h-16" />
-                    <h3 className="text-2xl font-black tracking-wider text-[#002060]">CENTRA</h3>
-                    <span className="text-[9px] font-bold text-slate-450 uppercase -mt-1.5 tracking-wider">PT Centurion Bank Tbk.</span>
+              <div className="flex-1 flex flex-col justify-between p-6 phone-brand-bg animate-fade-in">
+                <div className="flex justify-center items-center mt-8">
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="w-20 h-20 p-2.5 bg-white/40 backdrop-blur-md rounded-[28px] border border-white/50 shadow-md flex items-center justify-center">
+                      <CentraLogoNavy className="w-14 h-14" />
+                    </div>
+                    <div className="text-center">
+                      <h3 className="text-2xl font-black tracking-widest text-[#30009F] font-sans">CENTRA</h3>
+                      <span className="text-[9px] font-black text-[#30009F]/60 uppercase tracking-widest">PT Centurion Bank Tbk.</span>
+                    </div>
                   </div>
                 </div>
 
-                <div className="my-auto space-y-5">
-                  <div className="text-center space-y-1">
-                    <h4 className="text-lg font-bold text-slate-900">Selamat Siang</h4>
-                    <p className="text-xs text-slate-500 font-medium">Masuk menggunakan Akun Neon Terdaftar</p>
+                <div className="my-auto space-y-6">
+                  <div className="text-center space-y-1.5">
+                    <h4 className="text-xl font-extrabold text-slate-900">Selamat Datang</h4>
+                    <p className="text-xs text-slate-600 font-semibold">Masuk ke Rekening Centra Anda</p>
                   </div>
 
-                  <div className="space-y-4">
+                  <div className="space-y-4 bg-white/80 backdrop-blur-md p-5 rounded-3xl border border-white shadow-xl card-shadow">
                     <div>
-                      <label className="block text-[9px] font-extrabold uppercase tracking-wider text-slate-500 mb-1.5">User ID / Kode Akses</label>
+                      <label className="block text-[10px] font-black uppercase tracking-wider text-slate-600 mb-1.5">User ID / Kode Akses</label>
                       <input 
                         type="text" 
                         placeholder="Contoh: AMINAH28"
                         onChange={(e) => setFormInputs({ ...formInputs, loginUserId: e.target.value })}
-                        className="w-full h-11 px-4 rounded-xl border border-slate-200 bg-slate-50 font-bold text-sm focus:outline-none focus:ring-1 focus:ring-[#002060] text-slate-800"
+                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50/50 font-bold text-sm focus:outline-none focus:ring-2 focus:ring-[#30009F] focus:border-transparent text-slate-800 transition-all"
                       />
                     </div>
                     <div>
-                      <label className="block text-[9px] font-extrabold uppercase tracking-wider text-slate-500 mb-1.5">Kata Sandi</label>
+                      <label className="block text-[10px] font-black uppercase tracking-wider text-slate-600 mb-1.5">Kata Sandi</label>
                       <input 
                         type="password" 
                         placeholder="••••••••"
                         onChange={(e) => setFormInputs({ ...formInputs, loginPasscode: e.target.value })}
-                        className="w-full h-11 px-4 rounded-xl border border-slate-200 bg-slate-50 font-bold text-sm focus:outline-none focus:ring-1 focus:ring-[#002060] text-slate-800"
+                        className="w-full h-12 px-4 rounded-xl border border-slate-200 bg-slate-50/50 font-bold text-sm focus:outline-none focus:ring-2 focus:ring-[#30009F] focus:border-transparent text-slate-800 transition-all"
                       />
                     </div>
 
                     <button 
                       onClick={handleLogin}
-                      className="w-full h-11 rounded-xl bg-[#002060] hover:bg-[#001845] transition-all text-white font-extrabold text-sm flex items-center justify-center glow-navy active:scale-95"
+                      className="w-full h-12 rounded-xl bg-[#30009F] hover:bg-[#1e0064] transition-all text-white font-black text-sm flex items-center justify-center glow-violet active:scale-95 cursor-pointer"
                     >
                       Masuk Rekening
                     </button>
 
                     <button 
-                      onClick={() => setCurrentScreen("biometric_modal")}
-                      className="w-full h-11 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center justify-center gap-2 active:scale-95 border border-slate-200"
+                      onClick={() => { playSound("click"); setCurrentScreen("biometric_modal"); }}
+                      className="w-full h-12 rounded-xl bg-[#E3CDFF]/40 hover:bg-[#E3CDFF]/60 text-[#30009F] text-xs font-black flex items-center justify-center gap-2 active:scale-95 border border-[#E3CDFF]/85 transition-all cursor-pointer"
                     >
-                      👁️‍Q Sidik Jari / Face ID
+                      👁️ Verifikasi Sidik Jari / Face ID
+                    </button>
+
+                    <button 
+                      onClick={() => { 
+                        playSound("click"); 
+                        setRegStep(1); 
+                        setRegInputs({
+                          name: "",
+                          nik: "",
+                          birthDate: "",
+                          userId: "",
+                          passcode: "",
+                          pin: "",
+                          initialDeposit: 100000
+                        });
+                        setRegResult(null);
+                        setCurrentScreen("buka_rekening"); 
+                      }}
+                      className="w-full h-12 rounded-xl bg-white hover:bg-[#FFCDF7]/10 text-[#30009F] text-xs font-black flex items-center justify-center gap-2 active:scale-95 border border-dashed border-[#30009F]/40 transition-all cursor-pointer"
+                    >
+                      🏦 Belum Punya Rekening? Buka Sekarang
                     </button>
                   </div>
                 </div>
 
                 {/* Footnotes */}
-                <div className="text-center text-[10px] text-slate-400 font-semibold mt-4">
-                  Default login: ID <code className="font-mono bg-slate-100 px-1 rounded text-[#002060]">AMINAH28</code> &amp; Pass <code className="font-mono bg-slate-100 px-1 rounded text-[#002060]">2hanima8*</code>
+                <div className="text-center text-[10px] text-slate-500 font-bold mt-4 bg-white/30 backdrop-blur-xs py-2 px-3 rounded-xl border border-white/20">
+                  Default login: ID <code className="font-mono bg-white/70 px-1.5 py-0.5 rounded text-[#30009F] font-black">AMINAH28</code> &amp; Pass <code className="font-mono bg-white/70 px-1.5 py-0.5 rounded text-[#30009F] font-black">2hanima8*</code>
                 </div>
               </div>
             )}
 
             {/* BIOMETRICS SCAN SCREEN */}
             {currentScreen === "biometric_modal" && (
-              <div className="flex-1 flex flex-col items-center justify-center p-6 bg-white animate-fade-in text-center">
-                <div className="relative w-28 h-28 rounded-full border-2 border-[#002060]/20 flex items-center justify-center mb-6">
-                  <svg className="w-14 h-14 text-[#002060] animate-pulse" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
-                  </svg>
-                  <div className="absolute inset-0 border-2 border-[#002060] rounded-full animate-nfc-pulse pointer-events-none opacity-40"></div>
+              <div className="flex-1 flex flex-col justify-between p-6 phone-brand-bg animate-fade-in">
+                <div className="flex justify-center items-center mt-8">
+                  <div className="flex flex-col items-center gap-1.5">
+                    <CentraLogoNavy className="w-12 h-12" />
+                    <h3 className="text-lg font-black tracking-widest text-[#30009F]">CENTRA</h3>
+                  </div>
                 </div>
-                <h4 className="text-base font-bold text-slate-800">Verifikasi Biometrik</h4>
-                <p className="text-xs text-slate-500 mt-2 max-w-[200px] font-medium leading-relaxed">Letakkan jari Anda pada area pemindai sensor sidik jari perangkat</p>
+
+                <div className="flex-1 flex flex-col items-center justify-center text-center px-4">
+                  <div className="relative w-32 h-32 rounded-full bg-white/60 border-2 border-[#E3CDFF] flex items-center justify-center mb-8 shadow-md">
+                    <svg className="w-16 h-16 text-[#30009F] animate-pulse" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                    </svg>
+                    <div className="absolute inset-0 border-3 border-[#30009F] rounded-full animate-nfc-pulse pointer-events-none opacity-40"></div>
+                  </div>
+                  <h4 className="text-lg font-extrabold text-slate-900">Verifikasi Biometrik</h4>
+                  <p className="text-xs text-slate-600 mt-2 max-w-[220px] font-semibold leading-relaxed">Letakkan jari Anda pada area pemindai sensor sidik jari perangkat untuk verifikasi cepat</p>
+                </div>
                 
-                <div className="mt-8 space-y-2.5 w-full">
+                <div className="space-y-3 w-full">
                   <button 
                     onClick={async () => {
                       // Login Aminah automatically via Biometrics
@@ -639,7 +705,7 @@ export default function Home() {
                         pushNotification("Sidik Jari Gagal.");
                       }
                     }}
-                    className="w-full py-3 rounded-xl bg-emerald-650 bg-emerald-600 text-white text-xs font-bold active:scale-95 transition-transform"
+                    className="w-full py-3.5 rounded-xl bg-emerald-600 text-white text-xs font-black active:scale-95 transition-transform shadow-md cursor-pointer"
                   >
                     Simulasi Sidik Jari Selesai
                   </button>
@@ -648,9 +714,9 @@ export default function Home() {
                       playSound("click");
                       setCurrentScreen("login");
                     }}
-                    className="w-full py-3 rounded-xl bg-slate-100 text-slate-700 text-xs font-bold active:scale-95 border border-slate-200"
+                    className="w-full py-3.5 rounded-xl bg-[#E3CDFF]/50 text-[#30009F] text-xs font-black active:scale-95 border border-[#E3CDFF]/90 transition-transform cursor-pointer"
                   >
-                    Kembali
+                    Kembali ke Login Sandi
                   </button>
                 </div>
               </div>
@@ -661,391 +727,440 @@ export default function Home() {
               <>
                 {/* 3A: INTERFACE MODE LANSIA (ELDERLY MODE - AGE 55+) */}
                 {forceElderlyMode ? (
-                  <div className="flex-1 flex flex-col p-6 animate-fade-in justify-between">
+                  <div className="flex-1 flex flex-col animate-fade-in justify-between bg-[#E3CDFF]/30">
                     
-                    {/* Big Header */}
-                    <div className="space-y-1">
-                      <div className="flex justify-between items-center">
-                        <CentraLogoNavy className="w-10 h-10" />
-                        <span className="text-[10px] font-black text-amber-600 bg-amber-50 px-2 py-1 rounded-full border border-amber-200">MODE LANSIA AKTIF</span>
-                      </div>
-                      <h3 className="text-2xl font-black text-[#002060] pt-2">Selamat Siang,</h3>
-                      <h4 className="text-xl font-bold text-slate-800 leading-tight">Ibu {loggedInUser.name}</h4>
-                    </div>
-
-                    {/* Massive balance view */}
-                    <div className="p-6 rounded-2xl bg-gradient-to-tr from-[#002060] to-[#0A2540] text-white space-y-2.5 shadow-xl border border-[#002060]">
-                      <span className="text-xs font-bold uppercase tracking-wider text-yellow-400">Total Uang Anda Saat Ini:</span>
-                      <h2 className="text-3xl font-black font-mono leading-none tracking-tight">{formatRupiah(balance)}</h2>
-                      <span className="block text-xs font-mono opacity-80 pt-1">No. Rekening: {loggedInUser.accountNo}</span>
-                    </div>
-
-                    {/* Simplified Big-Button Grid (Easy to click, large fonts) */}
-                    <div className="space-y-4">
-                      <div className="grid grid-cols-2 gap-4">
-                        {/* 1. Kirim Uang */}
-                        <button 
-                          onClick={() => {
-                            playSound("click");
-                            setSelectedCategory("Transfer");
-                            // Default to in-bank Centra for simplicity
-                            setSelectedSubFeature("Antar Rekening Centra");
-                            setFormInputs({});
-                            setCurrentScreen("feature_detail");
-                          }}
-                          className="p-5 bg-indigo-50 border-2 border-indigo-200 rounded-2xl flex flex-col items-center justify-center gap-3 active:scale-95 shadow-sm"
-                        >
-                          <span className="text-4xl">📤</span>
-                          <span className="text-sm font-extrabold text-slate-800 text-center tracking-tight">Kirim Uang</span>
-                        </button>
-
-                        {/* 2. Tarik Tunai ATM */}
-                        <button 
-                          onClick={() => {
-                            playSound("click");
-                            setSelectedCategory("Cardless");
-                            setSelectedSubFeature("Tarik tunai");
-                            setFormInputs({});
-                            setCurrentScreen("feature_detail");
-                          }}
-                          className="p-5 bg-emerald-50 border-2 border-emerald-200 rounded-2xl flex flex-col items-center justify-center gap-3 active:scale-95 shadow-sm"
-                        >
-                          <span className="text-4xl">💵</span>
-                          <span className="text-sm font-extrabold text-slate-800 text-center tracking-tight">Tarik di ATM</span>
-                        </button>
-
-                        {/* 3. Bayar Tagihan */}
-                        <button 
-                          onClick={() => {
-                            playSound("click");
-                            setSelectedCategory("Tagihan");
-                            setSelectedSubFeature("PLN");
-                            setFormInputs({});
-                            setCurrentScreen("feature_detail");
-                          }}
-                          className="p-5 bg-amber-55 bg-amber-50 border-2 border-amber-200 rounded-2xl flex flex-col items-center justify-center gap-3 active:scale-95 shadow-sm"
-                        >
-                          <span className="text-4xl">🧾</span>
-                          <span className="text-sm font-extrabold text-slate-800 text-center tracking-tight">Bayar Listrik</span>
-                        </button>
-
-                        {/* 4. Rekening Koran */}
-                        <button 
-                          onClick={() => {
-                            playSound("click");
-                            setSelectedCategory("Rekening Koran");
-                            setSelectedSubFeature("Rekening Koran");
-                            setFormInputs({ month: "Juni 2026" });
-                            setCurrentScreen("feature_detail");
-                          }}
-                          className="p-5 bg-blue-50 border-2 border-blue-200 rounded-2xl flex flex-col items-center justify-center gap-3 active:scale-95 shadow-sm"
-                        >
-                          <span className="text-4xl">📄</span>
-                          <span className="text-sm font-extrabold text-slate-800 text-center tracking-tight">Cetak Laporan</span>
-                        </button>
+                    {/* Top portion on light purple */}
+                    <div className="p-6 pb-4 space-y-4">
+                      {/* Big Header */}
+                      <div className="space-y-1">
+                        <div className="flex justify-between items-center">
+                          <CentraLogoNavy className="w-12 h-12" />
+                          <span className="text-[10px] font-black text-[#30009F] bg-[#FFCDF7] px-3 py-1 rounded-full border border-[#FFCDF7]/80 shadow-2xs">MODE LANSIA AKTIF</span>
+                        </div>
+                        <h3 className="text-3xl font-black text-[#30009F] pt-3">Selamat Siang,</h3>
+                        <h4 className="text-2xl font-bold text-slate-800 leading-tight">Ibu {loggedInUser.name}</h4>
                       </div>
 
-                      {/* Customer Support Line */}
-                      <button 
-                        onClick={() => {
-                          playSound("click");
-                          pushNotification("Menghubungi Layanan Bantuan Khusus Lansia Centra Care (1500-112)");
-                        }}
-                        className="w-full py-4 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-sm active:scale-95 flex items-center justify-center gap-2"
-                      >
-                        📞 HUBUNGI BANTUAN DARURAT CS
-                      </button>
+                      {/* Massive balance view */}
+                      <div className="p-6 rounded-3xl bg-gradient-to-tr from-[#30009F] to-[#1e0064] text-white space-y-3.5 shadow-xl border border-[#30009F]">
+                        <span className="text-xs font-black uppercase tracking-wider text-[#FFCDF7]">Total Uang Anda Saat Ini:</span>
+                        <h2 className="text-4xl font-black font-mono leading-none tracking-tight">{formatRupiah(balance)}</h2>
+                        <span className="block text-xs font-mono opacity-80 pt-1.5">No. Rekening: {loggedInUser.accountNo}</span>
+                      </div>
                     </div>
 
-                    {/* Developer Toggle back to standard view */}
-                    <div className="flex justify-between items-center text-[11px] font-bold text-slate-400 border-t pt-4">
-                      <span>Usia Anda: {loggedInUser.age} tahun</span>
-                      <button 
-                        onClick={() => {
-                          playSound("click");
-                          setForceElderlyMode(false);
-                          pushNotification("Kembali ke tampilan standar.");
-                        }}
-                        className="text-[#002060] underline"
-                      >
-                        Paksa Mode Standar
-                      </button>
+                    {/* Bottom portion curved white card */}
+                    <div className="bg-white rounded-t-[36px] p-6 space-y-6 border-t border-slate-100 shadow-md">
+                      {/* Simplified Big-Button Grid (Easy to click, large fonts) */}
+                      <div className="space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
+                          {/* 1. Kirim Uang */}
+                          <button 
+                            onClick={() => {
+                              playSound("click");
+                              setSelectedCategory("Transfer");
+                              // Default to in-bank Centra for simplicity
+                              setSelectedSubFeature("Antar Rekening Centra");
+                              setFormInputs({});
+                              setCurrentScreen("feature_detail");
+                            }}
+                            className="p-5 bg-[#E3CDFF]/30 border-2 border-[#E3CDFF]/60 rounded-3xl flex flex-col items-center justify-center gap-3 active:scale-95 shadow-2xs cursor-pointer"
+                          >
+                            <img src="/asset/transfer-violet.png" className="w-11 h-11" alt="Transfer" />
+                            <span className="text-sm font-black text-slate-850 text-center tracking-tight leading-tight">Kirim Uang</span>
+                          </button>
+
+                          {/* 2. Tarik Tunai ATM */}
+                          <button 
+                            onClick={() => {
+                              playSound("click");
+                              setSelectedCategory("Cardless");
+                              setSelectedSubFeature("Tarik tunai");
+                              setFormInputs({});
+                              setCurrentScreen("feature_detail");
+                            }}
+                            className="p-5 bg-[#FFCDF7]/30 border-2 border-[#FFCDF7]/60 rounded-3xl flex flex-col items-center justify-center gap-3 active:scale-95 shadow-2xs cursor-pointer"
+                          >
+                            <img src="/asset/cardless-violet.png" className="w-11 h-11" alt="Cardless" />
+                            <span className="text-sm font-black text-slate-850 text-center tracking-tight leading-tight">Tarik di ATM</span>
+                          </button>
+
+                          {/* 3. Bayar Tagihan */}
+                          <button 
+                            onClick={() => {
+                              playSound("click");
+                              setSelectedCategory("Tagihan");
+                              setSelectedSubFeature("PLN");
+                              setFormInputs({});
+                              setCurrentScreen("feature_detail");
+                            }}
+                            className="p-5 bg-[#E3CDFF]/30 border-2 border-[#E3CDFF]/60 rounded-3xl flex flex-col items-center justify-center gap-3 active:scale-95 shadow-2xs cursor-pointer"
+                          >
+                            <img src="/asset/tagihan-violet.png" className="w-11 h-11" alt="Tagihan" />
+                            <span className="text-sm font-black text-slate-850 text-center tracking-tight leading-tight">Bayar Listrik</span>
+                          </button>
+
+                          {/* 4. Rekening Koran */}
+                          <button 
+                            onClick={() => {
+                              playSound("click");
+                              setSelectedCategory("Rekening Koran");
+                              setSelectedSubFeature("Rekening Koran");
+                              setFormInputs({ month: "Juni 2026" });
+                              setCurrentScreen("feature_detail");
+                            }}
+                            className="p-5 bg-[#FFCDF7]/30 border-2 border-[#FFCDF7]/60 rounded-3xl flex flex-col items-center justify-center gap-3 active:scale-95 shadow-2xs cursor-pointer"
+                          >
+                            <img src="/asset/e-statement-violet.png" className="w-11 h-11" alt="E-Statement" />
+                            <span className="text-sm font-black text-slate-850 text-center tracking-tight leading-tight">Cetak Laporan</span>
+                          </button>
+                        </div>
+
+                        {/* Customer Support Line */}
+                        <button 
+                          onClick={() => {
+                            playSound("click");
+                            pushNotification("Menghubungi Layanan Bantuan Khusus Lansia Centra Care (1500-112)");
+                          }}
+                          className="w-full py-4.5 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-black text-xs uppercase tracking-wider active:scale-95 flex items-center justify-center gap-2.5 cursor-pointer shadow-md animate-laser-pulse"
+                        >
+                          <img src="/asset/customer-service-pink.png" className="w-5.5 h-5.5" alt="CS Help" />
+                          <span>Hubungi CS Darurat Lansia</span>
+                        </button>
+                      </div>
+
+                      {/* Developer Toggle back to standard view */}
+                      <div className="flex justify-between items-center text-[11px] font-bold text-slate-400 border-t border-slate-100 pt-4">
+                        <span>Usia Anda: {loggedInUser.age} tahun</span>
+                        <button 
+                          onClick={() => {
+                            playSound("click");
+                            setForceElderlyMode(false);
+                            pushNotification("Kembali ke tampilan standar.");
+                          }}
+                          className="text-[#30009F] font-black underline cursor-pointer"
+                        >
+                          Paksa Mode Standar
+                        </button>
+                      </div>
                     </div>
 
                   </div>
                 ) : (
                   
                   /* 3B: INTERFACE MODE PRODUKTIF (STANDARD COMPLEX 12-MENU GRID) */
-                  <div className="flex-1 flex flex-col p-5 animate-fade-in space-y-4">
+                  <div className="flex-1 flex flex-col animate-fade-in bg-[#E3CDFF]/25">
                     
-                    {/* Header info */}
-                    <div className="flex justify-between items-center">
-                      <div className="flex items-center gap-2">
-                        <CentraLogoNavy className="w-8 h-8" />
-                        <div>
-                          <span className="text-[10px] text-slate-450 block font-bold uppercase tracking-wider">PT Centurion Bank</span>
-                          <span className="text-xs font-bold text-slate-800 leading-tight">Halo, {loggedInUser.name}</span>
+                    {/* Top Section (Header + Card) on lilac background */}
+                    <div className="p-5 pb-3.5 space-y-4">
+                      {/* Header info */}
+                      <div className="flex justify-between items-center">
+                        <div className="flex items-center gap-2.5">
+                          <CentraLogoNavy className="w-9 h-9" />
+                          <div>
+                            <span className="text-[10px] text-[#30009F] block font-black uppercase tracking-wider leading-none">CENTRA</span>
+                            <span className="text-xs font-bold text-slate-800 leading-tight">Halo, {loggedInUser.name}</span>
+                          </div>
                         </div>
-                      </div>
-                      <button 
-                        onClick={() => pushNotification("Tidak ada pesan baru.")}
-                        className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-sm border border-slate-200 hover:bg-slate-200"
-                      >
-                        🔔
-                      </button>
-                    </div>
-
-                    {/* Platinum Card representation */}
-                    <div className="h-44 rounded-2xl bg-gradient-to-tr from-[#002060] via-[#0A2540] to-[#002060] p-5 text-white flex flex-col justify-between shadow-lg relative overflow-hidden">
-                      <div className="absolute top-0 right-0 w-32 h-32 bg-yellow-500/10 rounded-full blur-2xl"></div>
-                      
-                      <div className="flex justify-between items-start z-10">
-                        <div>
-                          <span className="text-[9px] uppercase font-extrabold tracking-widest text-[#FFC80A]">Centra Gold Premium</span>
-                          <span className="block text-xs font-bold opacity-80 mt-0.5">Tabungan Centra Utama</span>
-                        </div>
-                        <span className="text-xs font-black tracking-widest text-[#FFC80A] italic">PREMIUM</span>
-                      </div>
-
-                      <div className="my-auto z-10">
                         <div className="flex items-center gap-2">
-                          <span className="text-2xl font-black font-mono tracking-tight">
-                            {isBalanceVisible ? formatRupiah(balance) : "••••••••"}
-                          </span>
                           <button 
-                            onClick={() => { playSound("click"); setIsBalanceVisible(!isBalanceVisible); }}
-                            className="text-base opacity-90 p-1"
+                            onClick={() => { playSound("click"); pushNotification("Menghubungi CS Centra Care..."); }}
+                            className="w-9 h-9 rounded-xl bg-white/70 border border-[#E3CDFF]/60 flex items-center justify-center hover:bg-white transition-all active:scale-95 cursor-pointer"
+                            title="Layanan Pelanggan"
                           >
-                            {isBalanceVisible ? "👁️" : "👁️‍Q"}
+                            <img src="/asset/customer-service-violet.png" className="w-5 h-5" alt="Customer Service" />
+                          </button>
+                          <button 
+                            onClick={() => { playSound("click"); pushNotification("Membuka Pengaturan..."); }}
+                            className="w-9 h-9 rounded-xl bg-white/70 border border-[#E3CDFF]/60 flex items-center justify-center hover:bg-white transition-all active:scale-95 cursor-pointer"
+                            title="Pengaturan"
+                          >
+                            <img src="/asset/setting-violet.png" className="w-5 h-5" alt="Settings" />
                           </button>
                         </div>
-                        <span className="text-[10px] font-mono opacity-60 tracking-wider">No. Rek: {loggedInUser.accountNo}</span>
                       </div>
 
-                      <div className="flex justify-between items-center text-[8px] opacity-75 font-extrabold tracking-widest z-10 border-t border-white/10 pt-2">
-                        <span>{loggedInUser.name.toUpperCase()}</span>
-                        <span>CENTURION BANK</span>
-                      </div>
-                    </div>
-
-                    {/* 12-MENU LAYANAN GRID */}
-                    <div className="space-y-2">
-                      <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#002060] block mb-1">Daftar Layanan Perbankan</span>
-                      
-                      <div className="grid grid-cols-4 gap-x-2 gap-y-4">
-                        
-                        {/* Transfer */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Transfer"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-indigo-55 bg-indigo-50 text-[#002060] border border-indigo-100 flex items-center justify-center text-lg shadow-sm">
-                            📤
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Transfer</span>
-                        </button>
-
-                        {/* Telekomunikasi */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Telekomunikasi"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-sky-50 text-sky-700 border border-sky-100 flex items-center justify-center text-lg shadow-sm">
-                            📱
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Pulsa &amp; Data</span>
-                        </button>
-
-                        {/* Tagihan */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Tagihan"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-amber-50 text-amber-700 border border-amber-100 flex items-center justify-center text-lg shadow-sm">
-                            🧾
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Tagihan</span>
-                        </button>
-
-                        {/* Keuangan */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Keuangan"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-emerald-50 text-emerald-700 border border-emerald-100 flex items-center justify-center text-lg shadow-sm">
-                            💳
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Keuangan</span>
-                        </button>
-
-                        {/* Hiburan */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Hiburan"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-rose-50 text-rose-700 border border-rose-100 flex items-center justify-center text-lg shadow-sm">
-                            🎮
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Hiburan</span>
-                        </button>
-
-                        {/* Layanan Pemerintah */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Layanan Pemerintah"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-blue-50 text-[#002060] border border-blue-100 flex items-center justify-center text-lg shadow-sm">
-                            🏛️
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Pemerintah</span>
-                        </button>
-
-                        {/* Pendidikan & Layanan Sosial */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Pendidikan & Layanan Sosial"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-purple-50 text-purple-700 border border-purple-100 flex items-center justify-center text-lg shadow-sm">
-                            🎓
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Pendidikan</span>
-                        </button>
-
-                        {/* Investasi */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Investasi"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-orange-50 text-orange-700 border border-orange-100 flex items-center justify-center text-lg shadow-sm">
-                            📈
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Investasi</span>
-                        </button>
-
-                        {/* Cardless */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Cardless"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-zinc-100 text-slate-700 border border-zinc-200 flex items-center justify-center text-lg shadow-sm">
-                            💵
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Cardless ATM</span>
-                        </button>
-
-                        {/* Produk Perbankan */}
-                        <button 
-                          onClick={() => { playSound("click"); setSelectedCategory("Produk Perbankan"); setCurrentScreen("feature_sheet"); }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-teal-50 text-teal-700 border border-teal-100 flex items-center justify-center text-lg shadow-sm">
-                            🏦
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">Produk Bank</span>
-                        </button>
-
-                        {/* E-statement */}
-                        <button 
-                          onClick={() => {
-                            playSound("click");
-                            setSelectedCategory("Rekening Koran");
-                            setSelectedSubFeature("Rekening Koran");
-                            setFormInputs({ month: "Juni 2026" });
-                            setCurrentScreen("feature_detail");
-                          }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-amber-50 text-[#002060] border border-amber-100 flex items-center justify-center text-lg shadow-sm">
-                            📄
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">E-Statement</span>
-                        </button>
-
-                        {/* CentraPot saving pockets */}
-                        <button 
-                          onClick={() => {
-                            playSound("click");
-                            setSelectedCategory("Produk Perbankan");
-                            setSelectedSubFeature("CentraPot");
-                            setCurrentScreen("feature_detail");
-                          }}
-                          className="flex flex-col items-center gap-1.5 active:opacity-75"
-                        >
-                          <div className="w-11 h-11 rounded-2xl bg-[#002060]/5 text-[#002060] border border-[#002060]/10 flex items-center justify-center text-lg shadow-sm">
-                            🏺
-                          </div>
-                          <span className="text-[9px] font-extrabold text-slate-700 text-center tracking-tight leading-tight">CentraPot</span>
-                        </button>
-
-                      </div>
-                    </div>
-
-                    {/* Developer panel inside standard view settings */}
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex justify-between items-center text-[10px] font-bold">
-                      <span className="text-slate-500">Demo Testing (Mode Lansia):</span>
-                      <button 
-                        onClick={() => {
-                          playSound("click");
-                          setForceElderlyMode(true);
-                          pushNotification("Tampilan disesuaikan untuk Lansia.");
-                        }}
-                        className="text-[#002060] underline"
-                      >
-                        Aktifkan Mode Lansia
-                      </button>
-                    </div>
-
-                    {/* Centra Promo Banner */}
-                    <div className="relative rounded-xl overflow-hidden bg-slate-50 border border-slate-200/60 p-3 flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-indigo-50 text-[#002060] flex items-center justify-center text-base shrink-0">
-                        ☕
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <h5 className="text-[10px] font-extrabold text-[#002060] leading-none uppercase">Mitra Kopi Kenangan</h5>
-                        <p className="text-[9px] text-slate-500 font-semibold mt-1 truncate">Diskon 50% untuk Kopi Susu Aren via QRIS Centra</p>
-                      </div>
-                    </div>
-
-                    {/* RIWAYAT MUTASI DARI DATABASE */}
-                    <div className="space-y-1.5">
-                      <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#002060]">Riwayat Transaksi (Neon DB)</span>
-                        <button 
-                          onClick={() => {
-                            playSound("click");
-                            setSelectedCategory("Rekening Koran");
-                            setSelectedSubFeature("Rekening Koran");
-                            setFormInputs({ month: "Juni 2026" });
-                            setCurrentScreen("feature_detail");
-                          }}
-                          className="text-[9px] font-bold text-[#002060] hover:underline"
-                        >
-                          Semua
-                        </button>
-                      </div>
-
-                      <div className="space-y-1 max-h-[140px] overflow-y-auto no-scrollbar">
-                        {transactions.length === 0 ? (
-                          <div className="p-3 text-center text-[10px] text-slate-400 italic font-semibold">
-                            Belum ada riwayat transaksi.
-                          </div>
-                        ) : (
-                          transactions.slice(0, 3).map((tx) => (
-                            <div key={tx.id} className="flex justify-between items-center p-2.5 rounded-xl bg-slate-50 border border-slate-200/50">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm">{tx.type === "credit" ? "📥" : "📤"}</span>
-                                <div>
-                                  <span className="text-[11px] font-bold text-slate-900 block leading-tight">{tx.title}</span>
-                                  <span className="text-[9px] text-slate-450 block font-semibold mt-0.5">{tx.category}</span>
-                                </div>
-                              </div>
-                              <span className={`text-[11px] font-bold font-mono ${tx.type === "credit" ? "text-emerald-600" : "text-slate-800"}`}>
-                                {tx.type === "credit" ? "+" : "-"}{formatRupiah(tx.amount)}
-                              </span>
+                      {/* Platinum Card representation (Split-Color Design) */}
+                      <div className="h-44 rounded-2xl flex flex-col justify-between shadow-xl relative overflow-hidden border border-[#E3CDFF]/30 card-shadow">
+                        {/* Top Part: Violet Brand Color */}
+                        <div className="h-[60%] bg-gradient-to-tr from-[#30009F] to-[#1e0064] p-4 text-white flex flex-col justify-between relative">
+                          <div className="absolute top-0 right-0 w-24 h-24 bg-[#FFCDF7]/15 rounded-full blur-xl"></div>
+                          
+                          <div className="flex justify-between items-start z-10">
+                            <div>
+                              <span className="text-[9px] uppercase font-black tracking-widest text-[#FFCDF7]">Centra Platinum Premium</span>
+                              <span className="block text-[10px] font-bold opacity-85 mt-0.5">Tabungan Centra Utama</span>
                             </div>
-                          ))
-                        )}
+                            <span className="text-[9px] font-black tracking-widest text-[#FFCDF7] bg-white/10 px-2 py-0.5 rounded-full border border-white/20">ACTIVE</span>
+                          </div>
+
+                          <div className="z-10 mt-1">
+                            <div className="flex items-center gap-2.5">
+                              <span className="text-2xl font-black font-mono tracking-tight leading-none">
+                                {isBalanceVisible ? formatRupiah(balance) : "••••••••"}
+                              </span>
+                              <button 
+                                onClick={() => { playSound("click"); setIsBalanceVisible(!isBalanceVisible); }}
+                                className="w-5 h-5 flex items-center justify-center opacity-95 hover:opacity-100 transition-opacity cursor-pointer"
+                              >
+                                <img 
+                                  src={isBalanceVisible ? "/asset/eye-on-pink.png" : "/asset/eye-off-pink.png"} 
+                                  className="w-5 h-5" 
+                                  alt="Toggle Balance" 
+                                />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Bottom Part: Clean White Details */}
+                        <div className="h-[40%] bg-white px-4 py-3 flex justify-between items-center text-[#30009F] font-bold text-[11px] border-t border-slate-100">
+                          <div>
+                            <span className="block text-[8px] text-slate-400 font-extrabold uppercase tracking-wider">No. Rekening</span>
+                            <span className="font-mono text-xs text-slate-800">{loggedInUser.accountNo}</span>
+                          </div>
+                          <div className="text-right">
+                            <span className="block text-[8px] text-slate-400 font-extrabold uppercase tracking-wider">Pemilik</span>
+                            <span className="text-slate-850 truncate block max-w-[150px]">{loggedInUser.name.toUpperCase()}</span>
+                          </div>
+                        </div>
                       </div>
+                    </div>
+
+                    {/* Bottom Section (White Sheet) */}
+                    <div className="flex-1 bg-white rounded-t-[36px] p-5 pb-8 space-y-5 border-t border-slate-100 shadow-md">
+                      
+                      {/* 12-MENU LAYANAN GRID */}
+                      <div className="space-y-3">
+                        <span className="text-[11px] font-black uppercase tracking-wider text-[#30009F] block mb-1">Layanan Perbankan</span>
+                        
+                        <div className="grid grid-cols-4 gap-x-1 gap-y-4.5">
+                          
+                          {/* Transfer */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Transfer"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#E3CDFF]/30 border border-[#E3CDFF]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/transfer-violet.png" className="w-7 h-7" alt="Transfer" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Transfer</span>
+                          </button>
+
+                          {/* Pulsa & Paket Data */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Telekomunikasi"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#FFCDF7]/30 border border-[#FFCDF7]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/paket-data-violet.png" className="w-7 h-7" alt="Pulsa & Data" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Pulsa &amp; Data</span>
+                          </button>
+
+                          {/* Tagihan */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Tagihan"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#E3CDFF]/30 border border-[#E3CDFF]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/tagihan-violet.png" className="w-7 h-7" alt="Tagihan" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Tagihan</span>
+                          </button>
+
+                          {/* Keuangan / Pembayaran */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Keuangan"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#FFCDF7]/30 border border-[#FFCDF7]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/pembayaran-&-top-up-violet.png" className="w-7 h-7" alt="Pembayaran" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Pembayaran</span>
+                          </button>
+
+                          {/* Hiburan */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Hiburan"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#FFCDF7]/30 border border-[#FFCDF7]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/hiburan-violet.png" className="w-7 h-7" alt="Hiburan" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Hiburan</span>
+                          </button>
+
+                          {/* Pajak (Layanan Pemerintah) */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Layanan Pemerintah"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#E3CDFF]/30 border border-[#E3CDFF]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/pajak-violet.png" className="w-7 h-7" alt="Pajak" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Pajak</span>
+                          </button>
+
+                          {/* Pendidikan */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Pendidikan & Layanan Sosial"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#E3CDFF]/30 border border-[#E3CDFF]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/edukasi-violet.png" className="w-7 h-7" alt="Pendidikan" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Pendidikan</span>
+                          </button>
+
+                          {/* Investasi */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Investasi"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#FFCDF7]/30 border border-[#FFCDF7]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/investasi-violet.png" className="w-7 h-7" alt="Investasi" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Investasi</span>
+                          </button>
+
+                          {/* Cardless */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Cardless"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#FFCDF7]/30 border border-[#FFCDF7]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/cardless-violet.png" className="w-7 h-7" alt="Cardless ATM" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Cardless</span>
+                          </button>
+
+                          {/* Produk Bank */}
+                          <button 
+                            onClick={() => { playSound("click"); setSelectedCategory("Produk Perbankan"); setCurrentScreen("feature_sheet"); }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#E3CDFF]/30 border border-[#E3CDFF]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/bank-violet.png" className="w-7 h-7" alt="Produk Perbankan" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight text-wrap">Produk Bank</span>
+                          </button>
+
+                          {/* E-Statement */}
+                          <button 
+                            onClick={() => {
+                              playSound("click");
+                              setSelectedCategory("Rekening Koran");
+                              setSelectedSubFeature("Rekening Koran");
+                              setFormInputs({ month: "Juni 2026" });
+                              setCurrentScreen("feature_detail");
+                            }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#E3CDFF]/30 border border-[#E3CDFF]/50 flex items-center justify-center shadow-xs">
+                              <img src="/asset/e-statement-violet.png" className="w-7 h-7" alt="E-Statement" />
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">Laporan</span>
+                          </button>
+
+                          {/* CentraPot */}
+                          <button 
+                            onClick={() => {
+                              playSound("click");
+                              setSelectedCategory("Produk Perbankan");
+                              setSelectedSubFeature("CentraPot");
+                              setCurrentScreen("feature_detail");
+                            }}
+                            className="flex flex-col items-center gap-2 active:scale-95 transition-transform cursor-pointer"
+                          >
+                            <div className="w-13 h-13 rounded-2xl bg-[#FFCDF7]/30 border border-[#FFCDF7]/50 flex items-center justify-center shadow-xs">
+                              {/* Bucket/Pot Custom SVG matching reference screenshot */}
+                              <svg viewBox="0 0 24 24" className="w-7 h-7" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M19 10v9a3 3 0 01-3 3H8a3 3 0 01-3-3v-9h14z" fill="#30009F" />
+                                <path d="M4 8h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v2a1 1 0 001 1z" fill="#30009F" opacity="0.8" />
+                                <path d="M12 2a3 3 0 00-3 3h6a3 3 0 00-3-3z" fill="#30009F" />
+                              </svg>
+                            </div>
+                            <span className="text-[10.5px] font-extrabold text-slate-800 text-center tracking-tight leading-tight">CentraPot</span>
+                          </button>
+
+                        </div>
+                      </div>
+
+                      {/* Developer panel inside standard view settings */}
+                      <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-2xl flex justify-between items-center text-[10px] font-bold">
+                        <span className="text-slate-500">Mode Lansia Demo Testing:</span>
+                        <button 
+                          onClick={() => {
+                            playSound("click");
+                            setForceElderlyMode(true);
+                            pushNotification("Tampilan disesuaikan untuk Lansia.");
+                          }}
+                          className="text-[#30009F] font-black underline cursor-pointer"
+                        >
+                          Aktifkan Mode Lansia
+                        </button>
+                      </div>
+
+                      {/* Centra Promo Banner */}
+                      <div className="relative rounded-2xl overflow-hidden bg-[#FFCDF7]/10 border border-[#FFCDF7]/35 p-3 flex items-center gap-3 shadow-2xs">
+                        <div className="w-9 h-9 rounded-xl bg-[#FFCDF7]/30 text-[#30009F] flex items-center justify-center text-lg shrink-0">
+                          ☕
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h5 className="text-[10px] font-black text-[#30009F] leading-none uppercase tracking-wide">Mitra Kopi Kenangan</h5>
+                          <p className="text-[10px] text-slate-600 font-semibold mt-1 truncate">Diskon 50% untuk Kopi Susu Aren via QRIS Centra</p>
+                        </div>
+                      </div>
+
+                      {/* RIWAYAT MUTASI DARI DATABASE */}
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="text-[11px] font-black uppercase tracking-wider text-[#30009F]">Riwayat Transaksi (Neon DB)</span>
+                          <button 
+                            onClick={() => {
+                              playSound("click");
+                              setSelectedCategory("Rekening Koran");
+                              setSelectedSubFeature("Rekening Koran");
+                              setFormInputs({ month: "Juni 2026" });
+                              setCurrentScreen("feature_detail");
+                            }}
+                            className="text-[10px] font-black text-[#30009F] hover:underline cursor-pointer"
+                          >
+                            Semua
+                          </button>
+                        </div>
+
+                        <div className="space-y-2 max-h-[140px] overflow-y-auto no-scrollbar">
+                          {transactions.length === 0 ? (
+                            <div className="p-3 text-center text-[10px] text-slate-450 italic font-semibold">
+                              Belum ada riwayat transaksi.
+                            </div>
+                          ) : (
+                            transactions.slice(0, 3).map((tx) => (
+                              <div key={tx.id} className="flex justify-between items-center p-3 rounded-2xl bg-[#E3CDFF]/15 border border-[#E3CDFF]/30 shadow-xs">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-9 h-9 rounded-xl bg-white border border-[#E3CDFF]/45 flex items-center justify-center shadow-2xs">
+                                    <img 
+                                      src={tx.type === "credit" ? "/asset/uang-masuk-violet.png" : "/asset/uang-keluar-violet.png"} 
+                                      className="w-5.5 h-5.5" 
+                                      alt={tx.type === "credit" ? "Uang Masuk" : "Uang Keluar"} 
+                                    />
+                                  </div>
+                                  <div>
+                                    <span className="text-xs font-bold text-slate-850 block leading-tight">{tx.title}</span>
+                                    <span className="text-[9.5px] text-[#30009F] font-extrabold uppercase mt-0.5 block">{tx.category}</span>
+                                  </div>
+                                </div>
+                                <span className={`text-xs font-black font-mono ${tx.type === "credit" ? "text-emerald-600" : "text-slate-850"}`}>
+                                  {tx.type === "credit" ? "+" : "-"}{formatRupiah(tx.amount)}
+                                </span>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+
                     </div>
 
                   </div>
@@ -1059,11 +1174,11 @@ export default function Home() {
                 <div className="flex items-center gap-2">
                   <button 
                     onClick={() => { playSound("click"); setCurrentScreen("dashboard"); }}
-                    className="text-lg p-1 font-bold text-[#002060]"
+                    className="text-lg p-1 font-bold text-[#30009F]"
                   >
                     &larr;
                   </button>
-                  <h3 className="text-base font-bold text-[#002060]">{selectedCategory}</h3>
+                  <h3 className="text-base font-bold text-[#30009F]">{selectedCategory}</h3>
                 </div>
 
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
@@ -1078,28 +1193,28 @@ export default function Home() {
                       <>
                         <button 
                           onClick={() => { playSound("click"); setSelectedSubFeature("Antar Rekening Centra"); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                          className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                          className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                         >
                           <span className="text-xs font-bold block text-slate-800">Antar Centra</span>
                           <span className="text-[9px] text-slate-400 block mt-1">Gratis biaya admin</span>
                         </button>
                         <button 
                           onClick={() => { playSound("click"); setSelectedSubFeature("Bank Lain"); setFormInputs({ bank: "BCA" }); setCurrentScreen("feature_detail"); }}
-                          className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                          className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                         >
                           <span className="text-xs font-bold block text-slate-800">Bank Lain</span>
                           <span className="text-[9px] text-slate-400 block mt-1">Transfer online / BI-Fast</span>
                         </button>
                         <button 
                           onClick={() => { playSound("click"); setSelectedSubFeature("Valas Bank Lain"); setFormInputs({ currency: "USD" }); setCurrentScreen("feature_detail"); }}
-                          className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                          className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                         >
                           <span className="text-xs font-bold block text-slate-800">Valas Bank Lain</span>
                           <span className="text-[9px] text-slate-400 block mt-1">Kirim mata uang asing</span>
                         </button>
                         <button 
                           onClick={() => { playSound("click"); setSelectedSubFeature("Virtual Account"); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                          className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                          className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                         >
                           <span className="text-xs font-bold block text-slate-800">Virtual Account</span>
                           <span className="text-[9px] text-slate-400 block mt-1">Pembayaran VA Instan</span>
@@ -1113,7 +1228,7 @@ export default function Home() {
                           <button
                             key={sub}
                             onClick={() => { playSound("click"); setSelectedSubFeature(sub); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                           >
                             <span className="text-xs font-bold block text-slate-800">{sub}</span>
                             <span className="text-[9px] text-slate-400 block mt-1">Simulasi pembelian {sub}</span>
@@ -1128,7 +1243,7 @@ export default function Home() {
                           <button
                             key={sub}
                             onClick={() => { playSound("click"); setSelectedSubFeature(sub); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                           >
                             <span className="text-xs font-bold block text-slate-800">{sub}</span>
                             <span className="text-[9px] text-slate-400 block mt-1">Bayar tagihan bulanan {sub}</span>
@@ -1143,7 +1258,7 @@ export default function Home() {
                           <button
                             key={sub}
                             onClick={() => { playSound("click"); setSelectedSubFeature(sub); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                           >
                             <span className="text-xs font-bold block text-slate-800">{sub}</span>
                             <span className="text-[9px] text-slate-400 block mt-1">{sub} Services</span>
@@ -1158,7 +1273,7 @@ export default function Home() {
                           <button
                             key={sub}
                             onClick={() => { playSound("click"); setSelectedSubFeature(sub); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                           >
                             <span className="text-xs font-bold block text-slate-800">{sub}</span>
                             <span className="text-[9px] text-slate-400 block mt-1">Beli voucher instan</span>
@@ -1173,7 +1288,7 @@ export default function Home() {
                           <button
                             key={sub}
                             onClick={() => { playSound("click"); setSelectedSubFeature(sub); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                           >
                             <span className="text-xs font-bold block text-slate-800">{sub}</span>
                             <span className="text-[9px] text-slate-400 block mt-1">Setoran &amp; Retribusi {sub}</span>
@@ -1188,7 +1303,7 @@ export default function Home() {
                           <button
                             key={sub}
                             onClick={() => { playSound("click"); setSelectedSubFeature(sub); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                           >
                             <span className="text-xs font-bold block text-slate-800">{sub}</span>
                             <span className="text-[9px] text-slate-400 block mt-1">Pembayaran {sub}</span>
@@ -1203,7 +1318,7 @@ export default function Home() {
                           <button
                             key={sub}
                             onClick={() => { playSound("click"); setSelectedSubFeature(sub); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                           >
                             <span className="text-xs font-bold block text-slate-800">{sub}</span>
                             <span className="text-[9px] text-slate-400 block mt-1">Beli instrumen {sub}</span>
@@ -1218,7 +1333,7 @@ export default function Home() {
                           <button
                             key={sub}
                             onClick={() => { playSound("click"); setSelectedSubFeature(sub); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                           >
                             <span className="text-xs font-bold block text-slate-800">{sub}</span>
                             <span className="text-[9px] text-slate-400 block mt-1">Transaksi ATM Tanpa Kartu</span>
@@ -1233,7 +1348,7 @@ export default function Home() {
                           <button
                             key={sub}
                             onClick={() => { playSound("click"); setSelectedSubFeature(sub); setFormInputs({}); setCurrentScreen("feature_detail"); }}
-                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#002060] active:scale-98 transition-all"
+                            className="p-3 text-left bg-white rounded-xl border border-slate-200 hover:border-[#30009F] active:scale-98 transition-all"
                           >
                             <span className="text-xs font-bold block text-slate-800">{sub}</span>
                             <span className="text-[9px] text-slate-400 block mt-1">Pembukaan {sub}</span>
@@ -1261,7 +1376,7 @@ export default function Home() {
                         setCurrentScreen("feature_sheet");
                       }
                     }}
-                    className="text-lg p-1 font-bold text-[#002060]"
+                    className="text-lg p-1 font-bold text-[#30009F]"
                   >
                     &larr;
                   </button>
@@ -1285,7 +1400,7 @@ export default function Home() {
                           placeholder="Masukkan No Rekening Centra"
                           value={formInputs.accNo || ""}
                           onChange={(e) => setFormInputs({ ...formInputs, accNo: e.target.value.replace(/[^0-9]/g, "") })}
-                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#002060] text-slate-850"
+                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#30009F] text-slate-850"
                         />
                       </div>
                       <div>
@@ -1295,7 +1410,7 @@ export default function Home() {
                           placeholder="Min Rp 10.000"
                           value={formInputs.amount || ""}
                           onChange={(e) => setFormInputs({ ...formInputs, amount: parseFloat(e.target.value) })}
-                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#002060] text-slate-850"
+                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#30009F] text-slate-850"
                         />
                       </div>
                       <button 
@@ -1313,7 +1428,7 @@ export default function Home() {
                             fee: 0
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Kirim Dana
                       </button>
@@ -1343,7 +1458,7 @@ export default function Home() {
                           placeholder="Masukkan No Rekening"
                           value={formInputs.accNo || ""}
                           onChange={(e) => setFormInputs({ ...formInputs, accNo: e.target.value.replace(/[^0-9]/g, "") })}
-                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#002060] text-slate-850"
+                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#30009F] text-slate-850"
                         />
                       </div>
                       <div>
@@ -1353,7 +1468,7 @@ export default function Home() {
                           placeholder="Min Rp 10.000"
                           value={formInputs.amount || ""}
                           onChange={(e) => setFormInputs({ ...formInputs, amount: parseFloat(e.target.value) })}
-                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#002060] text-slate-850"
+                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#30009F] text-slate-850"
                         />
                       </div>
                       <div className="flex justify-between text-[10px] font-bold text-slate-450">
@@ -1376,7 +1491,7 @@ export default function Home() {
                             bankName: formInputs.bank
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Kirim Dana
                       </button>
@@ -1407,7 +1522,7 @@ export default function Home() {
                             placeholder="Contoh: 100"
                             value={formInputs.valasAmount || ""}
                             onChange={(e) => setFormInputs({ ...formInputs, valasAmount: parseFloat(e.target.value) })}
-                            className="flex-1 h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#002060] text-slate-850"
+                            className="flex-1 h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#30009F] text-slate-850"
                           />
                           <span className="h-10 px-3 bg-slate-100 flex items-center justify-center font-bold text-xs rounded-lg text-slate-600">
                             {formInputs.currency || "USD"}
@@ -1426,7 +1541,7 @@ export default function Home() {
                           </div>
                           <div className="flex justify-between border-t border-slate-200 pt-1.5 font-bold">
                             <span className="text-slate-550">Ekuivalen Rupiah</span>
-                            <span className="text-[#002060]">
+                            <span className="text-[#30009F]">
                               {formatRupiah(
                                 formInputs.valasAmount * 
                                 (formInputs.currency === "USD" ? 16350 : formInputs.currency === "SGD" ? 12100 : formInputs.currency === "EUR" ? 17500 : 102)
@@ -1455,7 +1570,7 @@ export default function Home() {
                             note: `Swift Transfer ${formInputs.currency}`
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Kirim Remitansi Valas
                       </button>
@@ -1472,7 +1587,7 @@ export default function Home() {
                           placeholder="Contoh: 8029 0812 3456"
                           value={formInputs.vaNo || ""}
                           onChange={(e) => setFormInputs({ ...formInputs, vaNo: e.target.value.replace(/[^0-9]/g, "") })}
-                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#002060]"
+                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#30009F]"
                         />
                       </div>
                       <div>
@@ -1482,7 +1597,7 @@ export default function Home() {
                           placeholder="Nominal Pembayaran"
                           value={formInputs.amount || ""}
                           onChange={(e) => setFormInputs({ ...formInputs, amount: parseFloat(e.target.value) })}
-                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#002060]"
+                          className="w-full h-10 px-3 rounded-lg border border-slate-200 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-[#30009F]"
                         />
                       </div>
                       <button 
@@ -1500,7 +1615,7 @@ export default function Home() {
                             fee: 0
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Konfirmasi VA
                       </button>
@@ -1517,7 +1632,7 @@ export default function Home() {
                           placeholder="08xxxxxxxxxx"
                           value={formInputs.phone || ""}
                           onChange={(e) => setFormInputs({ ...formInputs, phone: e.target.value.replace(/[^0-9]/g, "") })}
-                          className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-1 focus:ring-[#002060]"
+                          className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-1 focus:ring-[#30009F]"
                         />
                       </div>
                       <div>
@@ -1547,7 +1662,7 @@ export default function Home() {
                             fee: 0
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Beli Pulsa
                       </button>
@@ -1592,7 +1707,7 @@ export default function Home() {
                             note: "Pengiriman profil via Email"
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Beli E-SIM
                       </button>
@@ -1602,7 +1717,7 @@ export default function Home() {
                   {/* KEUANGAN - E-MONEY CARD SIMULATION (NFC TAP CHECKOUT) */}
                   {selectedSubFeature === "E-Money Card" && (
                     <div className="space-y-4">
-                      <div className="p-3 bg-[#002060]/5 rounded-xl border border-[#002060]/10 text-xs text-slate-650 leading-normal">
+                      <div className="p-3 bg-[#30009F]/5 rounded-xl border border-[#30009F]/10 text-xs text-slate-650 leading-normal">
                         Simulasikan pembacaan chip kartu uang elektronik (CentraPay, Flazz, TapCash, E-Money) via sensor NFC smartphone Anda.
                       </div>
 
@@ -1614,7 +1729,7 @@ export default function Home() {
                               <button
                                 key={card}
                                 onClick={() => startNfcScanning(card)}
-                                className="p-3 text-center bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-800 hover:border-[#002060] transition-colors"
+                                className="p-3 text-center bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-800 hover:border-[#30009F] transition-colors"
                               >
                                 {card}
                               </button>
@@ -1625,9 +1740,9 @@ export default function Home() {
 
                       {nfcScanning && (
                         <div className="flex flex-col items-center justify-center p-6 text-center">
-                          <div className="relative w-20 h-20 rounded-full bg-[#002060]/10 flex items-center justify-center mb-4">
+                          <div className="relative w-20 h-20 rounded-full bg-[#30009F]/10 flex items-center justify-center mb-4">
                             <span className="text-xl">📡</span>
-                            <div className="absolute inset-0 rounded-full border-2 border-[#002060] animate-nfc-pulse"></div>
+                            <div className="absolute inset-0 rounded-full border-2 border-[#30009F] animate-nfc-pulse"></div>
                           </div>
                           <span className="text-xs font-bold text-slate-700">Mendekatkan Kartu ke Sensor NFC...</span>
                           <span className="text-[10px] text-slate-450 mt-1">Jangan pindahkan kartu Anda</span>
@@ -1750,7 +1865,7 @@ export default function Home() {
                             note: "Pembayaran Zakat Centra Care"
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Bayar Zakat Sekarang
                       </button>
@@ -1792,7 +1907,7 @@ export default function Home() {
                           });
                           pushNotification("Tagihan Pajak Ditemukan!");
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060]/10 text-[#002060] text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F]/10 text-[#30009F] text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Cek Tagihan Pajak
                       </button>
@@ -1805,7 +1920,7 @@ export default function Home() {
                           </div>
                           <div className="flex justify-between border-t border-slate-200 pt-1.5 font-bold">
                             <span className="text-slate-550">Pajak PKB + SWDKLLJ:</span>
-                            <span className="text-[#002060] font-mono">{formatRupiah(formInputs.taxBill)}</span>
+                            <span className="text-[#30009F] font-mono">{formatRupiah(formInputs.taxBill)}</span>
                           </div>
                           
                           <button 
@@ -1819,7 +1934,7 @@ export default function Home() {
                                 recipient: formInputs.plate
                               });
                             }}
-                            className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95 mt-2"
+                            className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95 mt-2"
                           >
                             Bayar Pajak
                           </button>
@@ -1846,7 +1961,7 @@ export default function Home() {
 
                       <button 
                         onClick={handleGenerateEstatement}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Generate E-Statement
                       </button>
@@ -1863,7 +1978,7 @@ export default function Home() {
                             <button
                               key={amt}
                               onClick={() => setFormInputs({ ...formInputs, selectedAmt: amt })}
-                              className={`p-3 text-center rounded-xl border text-xs font-bold font-mono transition-all ${formInputs.selectedAmt === amt ? "bg-[#002060] border-[#002060] text-white" : "bg-white border-slate-200 text-slate-850"}`}
+                              className={`p-3 text-center rounded-xl border text-xs font-bold font-mono transition-all ${formInputs.selectedAmt === amt ? "bg-[#30009F] border-[#30009F] text-white" : "bg-white border-slate-200 text-slate-850"}`}
                             >
                               {formatRupiah(amt).replace("Rp", "").trim()}
                             </button>
@@ -1886,7 +2001,7 @@ export default function Home() {
                             note: "Tarik Tunai ATM"
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Dapatkan Kode Penarikan ATM
                       </button>
@@ -1924,7 +2039,7 @@ export default function Home() {
                             note: "Setor Tunai ATM"
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Konfirmasi Setor Tunai
                       </button>
@@ -1934,7 +2049,7 @@ export default function Home() {
                   {/* PRODUK BANK - CENTRAPOT */}
                   {selectedSubFeature === "CentraPot" && (
                     <div className="space-y-4">
-                      <div className="p-3 bg-[#002060]/5 rounded-xl border border-[#002060]/10 text-xs text-slate-650 leading-normal">
+                      <div className="p-3 bg-[#30009F]/5 rounded-xl border border-[#30009F]/10 text-xs text-slate-650 leading-normal">
                         <strong>CentraPot</strong> membantu Anda menyisihkan tabungan khusus untuk pos tertentu seperti liburan, beli gadget, atau investasi.
                       </div>
 
@@ -1944,7 +2059,7 @@ export default function Home() {
                             <span>Daftar Saving Pockets (Neon DB)</span>
                             <button 
                               onClick={() => setFormInputs({ ...formInputs, showNewPotForm: true })}
-                              className="text-xs font-bold text-[#002060] hover:underline"
+                              className="text-xs font-bold text-[#30009F] hover:underline"
                             >
                               + Buat Pocket
                             </button>
@@ -1960,7 +2075,7 @@ export default function Home() {
                                 <div key={pot.id} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
                                   <div className="flex justify-between items-baseline text-xs font-bold text-slate-850">
                                     <span>{pot.title}</span>
-                                    <span className="text-[#002060] font-mono">{formatRupiah(pot.current)} / {formatRupiah(pot.target).replace("Rp", "").trim()}</span>
+                                    <span className="text-[#30009F] font-mono">{formatRupiah(pot.current)} / {formatRupiah(pot.target).replace("Rp", "").trim()}</span>
                                   </div>
                                   <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
                                     <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${Math.min(100, (pot.current / pot.target) * 100)}%` }}></div>
@@ -1972,7 +2087,7 @@ export default function Home() {
                         </div>
                       ) : (
                         <div className="space-y-3 animate-fade-in bg-slate-50 p-4 rounded-xl border border-slate-200">
-                          <span className="block text-xs font-bold text-[#002060] border-b pb-1">Pocket Baru</span>
+                          <span className="block text-xs font-bold text-[#30009F] border-b pb-1">Pocket Baru</span>
                           
                           <div>
                             <label className="block text-[9px] font-extrabold text-slate-550 uppercase mb-1">Nama Pocket</label>
@@ -1997,7 +2112,7 @@ export default function Home() {
 
                           <button 
                             onClick={handleCreateCentraPot}
-                            className="w-full py-2 bg-[#002060] text-white text-xs font-bold rounded-lg active:scale-95 mt-1"
+                            className="w-full py-2 bg-[#30009F] text-white text-xs font-bold rounded-lg active:scale-95 mt-1"
                           >
                             Simpan Pocket
                           </button>
@@ -2041,10 +2156,10 @@ export default function Home() {
                       </div>
 
                       {formInputs.depoPrincipal >= 10000000 && (
-                        <div className="p-3 bg-[#002060]/5 border border-[#002060]/10 rounded-lg text-xs space-y-1">
+                        <div className="p-3 bg-[#30009F]/5 border border-[#30009F]/10 rounded-lg text-xs space-y-1">
                           <div className="flex justify-between">
                             <span className="text-slate-500 font-semibold">Estimasi Bunga Kotor/Bulan:</span>
-                            <span className="font-bold font-mono text-[#002060]">{formatRupiah(formInputs.interest)}</span>
+                            <span className="font-bold font-mono text-[#30009F]">{formatRupiah(formInputs.interest)}</span>
                           </div>
                         </div>
                       )}
@@ -2064,7 +2179,7 @@ export default function Home() {
                             note: "Deposito Berjangka Online"
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Buka Deposito Sekarang
                       </button>
@@ -2106,7 +2221,7 @@ export default function Home() {
                             recipient: `Ref: ${Math.floor(1000 + Math.random() * 9000)}`
                           });
                         }}
-                        className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                        className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                       >
                         Proses Pembayaran
                       </button>
@@ -2117,23 +2232,359 @@ export default function Home() {
               </div>
             )}
 
+            {/* 2B. BUKA REKENING (REGISTRATION FLOW) */}
+            {currentScreen === "buka_rekening" && (
+              <div className="flex-1 flex flex-col justify-between p-6 phone-brand-bg animate-fade-in">
+                {/* Header */}
+                <div className="flex items-center gap-3 border-b border-[#E3CDFF]/30 pb-3 mt-4">
+                  {regStep < 4 && (
+                    <button 
+                      onClick={() => {
+                        playSound("click");
+                        if (regStep > 1) {
+                          setRegStep(regStep - 1);
+                        } else {
+                          setCurrentScreen("login");
+                        }
+                      }}
+                      className="text-[#30009F] font-black text-lg p-1 bg-white/50 hover:bg-white/80 rounded-lg w-8 h-8 flex items-center justify-center transition-all cursor-pointer"
+                    >
+                      &larr;
+                    </button>
+                  )}
+                  <div>
+                    <h3 className="text-base font-extrabold text-[#30009F]">Buka Rekening Baru</h3>
+                    <p className="text-[10px] text-slate-500 font-bold">PT Centurion Bank Tbk.</p>
+                  </div>
+                </div>
+
+                {/* Step Indicator (Progress Bar) */}
+                {regStep < 4 && (
+                  <div className="mt-4 space-y-2">
+                    <div className="flex justify-between items-center text-[10px] font-black text-[#30009F] uppercase tracking-wider">
+                      <span>Langkah {regStep} dari 3</span>
+                      <span>
+                        {regStep === 1 && "Verifikasi Identitas"}
+                        {regStep === 2 && "Pembuatan Akun"}
+                        {regStep === 3 && "Keamanan & Setoran"}
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-gradient-to-r from-[#30009F] to-[#FFCDF7] transition-all duration-300"
+                        style={{ width: `${(regStep / 3) * 100}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Form Container */}
+                <div className="flex-1 my-4 flex flex-col justify-center">
+                  
+                  {/* STEP 1: PERSONAL DETAILS */}
+                  {regStep === 1 && (
+                    <div className="space-y-4 bg-white/80 backdrop-blur-md p-5 rounded-3xl border border-white shadow-xl card-shadow">
+                      <div className="text-center pb-2 border-b border-slate-100">
+                        <span className="text-2xl">📝</span>
+                        <h4 className="text-sm font-black text-slate-800 mt-1">Data Diri Lengkap</h4>
+                        <p className="text-[10px] text-slate-500 font-semibold leading-tight">Harap isi sesuai KTP asli Anda demi kelancaran verifikasi sistem perbankan</p>
+                      </div>
+
+                      <div className="space-y-3.5">
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-wider text-slate-600 mb-1">Nama Lengkap</label>
+                          <input 
+                            type="text" 
+                            placeholder="Contoh: BUDI HARIANTO"
+                            value={regInputs.name}
+                            onChange={(e) => setRegInputs({ ...regInputs, name: e.target.value.toUpperCase() })}
+                            className="w-full h-11 px-3.5 rounded-xl border border-slate-200 bg-slate-50/50 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-[#30009F] text-slate-800"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-wider text-slate-655 mb-1">Nomor NIK (KTP - 16 Digit)</label>
+                          <input 
+                            type="text" 
+                            maxLength={16}
+                            placeholder="Masukkan 16 digit NIK Anda"
+                            value={regInputs.nik}
+                            onChange={(e) => setRegInputs({ ...regInputs, nik: e.target.value.replace(/[^0-9]/g, "") })}
+                            className="w-full h-11 px-3.5 rounded-xl border border-slate-200 bg-slate-50/50 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-[#30009F] text-slate-800 font-mono tracking-wider"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-wider text-slate-655 mb-1">Tanggal Lahir</label>
+                          <input 
+                            type="date" 
+                            value={regInputs.birthDate}
+                            onChange={(e) => setRegInputs({ ...regInputs, birthDate: e.target.value })}
+                            className="w-full h-11 px-3.5 rounded-xl border border-slate-200 bg-slate-50/50 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-[#30009F] text-slate-800"
+                          />
+                        </div>
+                      </div>
+
+                      <button 
+                        onClick={() => {
+                          playSound("click");
+                          if (!regInputs.name.trim()) {
+                            pushNotification("Nama lengkap wajib diisi!");
+                            return;
+                          }
+                          if (regInputs.nik.length !== 16) {
+                            pushNotification("NIK harus tepat 16 digit!");
+                            return;
+                          }
+                          if (!regInputs.birthDate) {
+                            pushNotification("Tanggal lahir wajib diisi!");
+                            return;
+                          }
+                          setRegStep(2);
+                        }}
+                        className="w-full h-11 rounded-xl bg-[#30009F] text-white font-black text-xs hover:bg-[#1e0064] transition-all flex items-center justify-center active:scale-95 cursor-pointer shadow-md mt-4"
+                      >
+                        Lanjutkan Ke Langkah 2
+                      </button>
+                    </div>
+                  )}
+
+                  {/* STEP 2: ACCESS CREDENTIALS */}
+                  {regStep === 2 && (
+                    <div className="space-y-4 bg-white/80 backdrop-blur-md p-5 rounded-3xl border border-white shadow-xl card-shadow">
+                      <div className="text-center pb-2 border-b border-slate-100">
+                        <span className="text-2xl">🔑</span>
+                        <h4 className="text-sm font-black text-slate-800 mt-1">Buat Akun M-Banking</h4>
+                        <p className="text-[10px] text-slate-500 font-semibold leading-tight">Buat User ID dan password unik untuk mengakses Centra Mobile Anda</p>
+                      </div>
+
+                      <div className="space-y-3.5">
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-wider text-slate-655 mb-1">User ID / Kode Akses</label>
+                          <input 
+                            type="text" 
+                            placeholder="Contoh: BUDI99"
+                            value={regInputs.userId}
+                            onChange={(e) => setRegInputs({ ...regInputs, userId: e.target.value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase() })}
+                            className="w-full h-11 px-3.5 rounded-xl border border-slate-200 bg-slate-50/50 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-[#30009F] text-slate-800"
+                          />
+                          <span className="text-[9px] text-slate-450 font-bold mt-1 block leading-tight">Hanya huruf dan angka. Disimpan dalam huruf besar.</span>
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-wider text-slate-655 mb-1">Kata Sandi (Password)</label>
+                          <input 
+                            type="password" 
+                            placeholder="Min 6 karakter"
+                            value={regInputs.passcode}
+                            onChange={(e) => setRegInputs({ ...regInputs, passcode: e.target.value })}
+                            className="w-full h-11 px-3.5 rounded-xl border border-slate-200 bg-slate-50/50 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-[#30009F] text-slate-800"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex gap-2.5 mt-4">
+                        <button 
+                          onClick={() => { playSound("click"); setRegStep(1); }}
+                          className="w-1/3 h-11 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs transition-all flex items-center justify-center active:scale-95 cursor-pointer"
+                        >
+                          Kembali
+                        </button>
+                        <button 
+                          onClick={() => {
+                            playSound("click");
+                            if (regInputs.userId.length < 4) {
+                              pushNotification("User ID minimal 4 karakter!");
+                              return;
+                            }
+                            if (regInputs.passcode.length < 6) {
+                              pushNotification("Password minimal 6 karakter!");
+                              return;
+                            }
+                            setRegStep(3);
+                          }}
+                          className="flex-1 h-11 rounded-xl bg-[#30009F] text-white font-black text-xs hover:bg-[#1e0064] transition-all flex items-center justify-center active:scale-95 cursor-pointer shadow-md"
+                        >
+                          Lanjutkan Ke Langkah 3
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* STEP 3: SECURITY & DEPOSIT */}
+                  {regStep === 3 && (
+                    <div className="space-y-4 bg-white/80 backdrop-blur-md p-5 rounded-3xl border border-white shadow-xl card-shadow">
+                      <div className="text-center pb-2 border-b border-slate-100">
+                        <span className="text-2xl">💰</span>
+                        <h4 className="text-sm font-black text-slate-800 mt-1">Keamanan &amp; Setoran</h4>
+                        <p className="text-[10px] text-slate-500 font-semibold leading-tight">Buat PIN 6 digit untuk transaksi dan tentukan setoran awal Anda</p>
+                      </div>
+
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-wider text-slate-655 mb-1.5">PIN Transaksi (6 Digit Angka)</label>
+                          <input 
+                            type="password" 
+                            maxLength={6}
+                            placeholder="••••••"
+                            value={regInputs.pin}
+                            onChange={(e) => setRegInputs({ ...regInputs, pin: e.target.value.replace(/[^0-9]/g, "") })}
+                            className="w-full h-11 px-3.5 rounded-xl border border-slate-200 bg-slate-50/50 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-[#30009F] text-slate-800 font-mono tracking-widest text-center"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-wider text-slate-655 mb-2.5">Pilihan Setoran Awal</label>
+                          <div className="grid grid-cols-3 gap-2">
+                            {[100000, 250000, 500000].map((amount) => (
+                              <button
+                                key={amount}
+                                type="button"
+                                onClick={() => { playSound("click"); setRegInputs({ ...regInputs, initialDeposit: amount }); }}
+                                className={`py-3.5 rounded-xl border font-black text-[11px] transition-all flex flex-col items-center justify-center gap-1 active:scale-95 cursor-pointer ${
+                                  regInputs.initialDeposit === amount 
+                                    ? "bg-[#30009F] border-[#30009F] text-white shadow-md"
+                                    : "bg-white border-slate-200 hover:border-[#E3CDFF] text-[#30009F]"
+                                }`}
+                              >
+                                <span>Rp</span>
+                                <span>{amount === 100000 ? "100.000" : amount === 250000 ? "250.000" : "500.000"}</span>
+                              </button>
+                            ))}
+                          </div>
+                          <span className="text-[9px] text-[#30009F] font-bold mt-2 block text-center leading-tight">Biaya pembuatan rekening &amp; kartu debit Rp 0 (FREE!)</span>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-2.5 mt-4">
+                        <button 
+                          onClick={() => { playSound("click"); setRegStep(2); }}
+                          className="w-1/3 h-11 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs transition-all flex items-center justify-center active:scale-95 cursor-pointer"
+                        >
+                          Kembali
+                        </button>
+                        <button 
+                          onClick={async () => {
+                            playSound("click");
+                            if (regInputs.pin.length !== 6) {
+                              pushNotification("PIN transaksi harus tepat 6 digit angka!");
+                              return;
+                            }
+                            
+                            setIsLoading(true);
+                            try {
+                              const res = await registerUserAction(regInputs);
+                              if (res.success && res.accountNo) {
+                                playSound("success");
+                                setRegResult({ accountNo: res.accountNo, userId: res.userId });
+                                setRegStep(4);
+                                pushNotification("Rekening Baru Berhasil Dibuka!");
+                              } else {
+                                playSound("error");
+                                pushNotification(res.error || "Gagal membuka rekening.");
+                              }
+                            } catch (err: any) {
+                              console.error(err);
+                              playSound("error");
+                              pushNotification("Terjadi kesalahan jaringan atau database.");
+                            } finally {
+                              setIsLoading(false);
+                            }
+                          }}
+                          className="flex-1 h-11 rounded-xl bg-[#30009F] text-white font-black text-xs hover:bg-[#1e0064] transition-all flex items-center justify-center active:scale-95 cursor-pointer shadow-md"
+                        >
+                          Buka Rekening
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                </div>
+
+                {/* STEP 4: SUCCESS REGISTRATION SCREEN */}
+                {regStep === 4 && regResult && (
+                  <div className="flex-1 flex flex-col justify-between my-4 animate-fade-in">
+                    <div className="flex-1 flex flex-col items-center justify-center text-center px-4">
+                      
+                      {/* Success Badge */}
+                      <div className="w-20 h-20 rounded-full bg-[#E3CDFF]/30 border-2 border-[#E3CDFF] flex items-center justify-center mb-6 shadow-md animate-bounce">
+                        <span className="text-3xl">🎉</span>
+                      </div>
+
+                      <h4 className="text-xl font-black text-slate-900 leading-tight">Rekening Berhasil Dibuka!</h4>
+                      <p className="text-xs text-slate-655 mt-1.5 font-bold leading-normal">Selamat datang di keluarga PT Centurion Bank Tbk. Berikut adalah detail akun Anda:</p>
+
+                      {/* Details Box */}
+                      <div className="w-full mt-6 bg-white/90 border border-[#E3CDFF]/40 rounded-3xl p-5 shadow-lg space-y-4 text-left card-shadow">
+                        <div className="flex justify-between items-center border-b border-slate-100 pb-2.5">
+                          <span className="text-[10px] text-slate-450 font-extrabold uppercase tracking-wider">Nama Nasabah</span>
+                          <span className="text-xs font-black text-slate-800">{regInputs.name}</span>
+                        </div>
+
+                        <div className="flex justify-between items-center border-b border-slate-100 pb-2.5">
+                          <span className="text-[10px] text-slate-450 font-extrabold uppercase tracking-wider">Nomor Rekening</span>
+                          <span className="text-sm font-black text-[#30009F] font-mono tracking-wider">{regResult.accountNo}</span>
+                        </div>
+
+                        <div className="flex justify-between items-center border-b border-slate-100 pb-2.5">
+                          <span className="text-[10px] text-slate-450 font-extrabold uppercase tracking-wider">M-Banking User ID</span>
+                          <span className="text-xs font-black text-slate-800 font-mono tracking-wider">{regResult.userId}</span>
+                        </div>
+
+                        <div className="flex justify-between items-center">
+                          <span className="text-[10px] text-slate-450 font-extrabold uppercase tracking-wider">Saldo Setoran Awal</span>
+                          <span className="text-xs font-black text-emerald-600 font-mono">{formatRupiah(regInputs.initialDeposit)}</span>
+                        </div>
+                      </div>
+
+                      <div className="mt-5 p-3.5 bg-[#FFCDF7]/10 border border-[#FFCDF7]/35 rounded-2xl text-[10px] text-[#30009F] font-bold text-center leading-relaxed">
+                        💡 Catatan Keamanan: Jangan pernah membagikan kata sandi atau PIN Anda kepada siapa pun, termasuk pihak Bank Centra.
+                      </div>
+                    </div>
+
+                    <button 
+                      onClick={() => {
+                        playSound("click");
+                        // Populate login screen inputs so the user can easily log in
+                        setFormInputs({ 
+                          ...formInputs, 
+                          loginUserId: regResult.userId 
+                        });
+                        setCurrentScreen("login");
+                      }}
+                      className="w-full h-12 rounded-xl bg-[#30009F] hover:bg-[#1e0064] text-white font-black text-sm flex items-center justify-center active:scale-95 cursor-pointer shadow-md"
+                    >
+                      Masuk Rekening Baru
+                    </button>
+                  </div>
+                )}
+
+                {/* Footer brand info */}
+                {regStep < 4 && (
+                  <div className="text-center text-[9px] text-slate-400 font-bold border-t border-slate-100 pt-3">
+                    Centra Mobile Onboarding System &bull; &copy; 2026 PT Centurion Bank Tbk.
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* E-STATEMENT LEDGER DETAILED VIEW SCREEN */}
             {currentScreen === "estatement_view" && statementData && (
               <div className="flex-1 flex flex-col p-5 animate-fade-in space-y-4">
                 <div className="flex items-center gap-2 border-b pb-2">
                   <button 
                     onClick={() => { playSound("click"); setCurrentScreen("feature_detail"); }}
-                    className="text-lg p-1 font-bold text-[#002060]"
+                    className="text-lg p-1 font-bold text-[#30009F]"
                   >
                     &larr;
                   </button>
-                  <h3 className="text-base font-bold text-[#002060]">E-Statement Ledger</h3>
+                  <h3 className="text-base font-bold text-[#30009F]">E-Statement Ledger</h3>
                 </div>
 
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-4 text-[10px] font-sans">
                   <div className="flex justify-between items-start border-b pb-2">
                     <div>
-                      <span className="font-extrabold text-[#002060] block text-xs">LAPORAN MUTASI REKENING KORAN</span>
+                      <span className="font-extrabold text-[#30009F] block text-xs">LAPORAN MUTASI REKENING KORAN</span>
                       <span className="text-[8px] text-slate-400 font-mono">Bulan: {statementData.month}</span>
                     </div>
                     <CentraLogoNavy className="w-6 h-6 animate-pulse" />
@@ -2191,16 +2642,16 @@ export default function Home() {
 
             {/* 6. PIN TRANSKEYPAD MODAL */}
             {currentScreen === "pin_modal" && (
-              <div className="flex-1 flex flex-col justify-between p-6 animate-fade-in bg-slate-900 text-white">
+              <div className="flex-1 flex flex-col justify-between p-6 animate-fade-in bg-gradient-to-b from-[#30009F] to-[#1e0064] text-white">
                 <div className="text-center mt-6">
-                  <h3 className="text-base font-extrabold text-white">PIN Transaksi</h3>
-                  <p className="text-[10px] text-slate-400 mt-1">Masukkan 6 digit PIN untuk menyelesaikan transaksi Anda</p>
+                  <h3 className="text-lg font-black tracking-widest text-[#FFCDF7]">PIN Transaksi</h3>
+                  <p className="text-[11px] text-[#E3CDFF] mt-1 font-semibold">Masukkan 6 digit PIN transaksi Centra Anda</p>
                   
                   <div className="flex justify-center gap-3.5 mt-8">
                     {[0, 1, 2, 3, 4, 5].map((i) => (
                       <div 
                         key={i} 
-                        className={`w-3.5 h-3.5 rounded-full border-2 border-yellow-500 transition-all ${pinInput.length > i ? "bg-yellow-500" : ""}`}
+                        className={`w-4 h-4 rounded-full border-2 border-[#FFCDF7] transition-all duration-200 ${pinInput.length > i ? "bg-[#FFCDF7] scale-110 shadow-[0_0_10px_rgba(255,205,247,0.8)]" : "bg-transparent"}`}
                       />
                     ))}
                   </div>
@@ -2211,26 +2662,26 @@ export default function Home() {
                     <button 
                       key={num} 
                       onClick={() => handlePinPress(num)}
-                      className="w-16 h-16 rounded-full bg-slate-800 border border-slate-700 text-white font-mono font-bold text-xl flex items-center justify-center pin-btn"
+                      className="w-16 h-16 rounded-full bg-white/10 border border-white/20 text-white font-mono font-bold text-2xl flex items-center justify-center pin-btn cursor-pointer transition-all hover:bg-white/20"
                     >
                       {num}
                     </button>
                   ))}
                   <button 
                     onClick={() => { playSound("click"); setCurrentScreen("dashboard"); }}
-                    className="w-16 h-16 rounded-full bg-slate-900 text-slate-400 text-xs flex items-center justify-center hover:text-white"
+                    className="w-16 h-16 rounded-full text-[#FFCDF7] text-xs font-black flex items-center justify-center hover:text-white cursor-pointer active:scale-90 transition-transform"
                   >
-                    Batal
+                    BATAL
                   </button>
                   <button 
                     onClick={() => handlePinPress("0")}
-                    className="w-16 h-16 rounded-full bg-slate-800 border border-slate-700 text-white font-mono font-bold text-xl flex items-center justify-center pin-btn"
+                    className="w-16 h-16 rounded-full bg-white/10 border border-white/20 text-white font-mono font-bold text-2xl flex items-center justify-center pin-btn cursor-pointer transition-all hover:bg-white/20"
                   >
                     0
                   </button>
                   <button 
                     onClick={handlePinBackspace}
-                    className="w-16 h-16 rounded-full bg-slate-900 text-slate-400 text-sm flex items-center justify-center hover:text-white"
+                    className="w-16 h-16 rounded-full text-[#FFCDF7] text-lg font-bold flex items-center justify-center hover:text-white cursor-pointer active:scale-90 transition-transform"
                   >
                     &larr;
                   </button>
@@ -2240,60 +2691,67 @@ export default function Home() {
 
             {/* 7. DIGITAL RECEIPT (SUCCESS VIEW) */}
             {currentScreen === "receipt" && lastTxResult && (
-              <div className="flex-1 flex flex-col justify-between p-5 animate-fade-in">
-                <div className="flex-1 flex flex-col items-center justify-center mt-6 text-center space-y-4">
-                  <div className="w-16 h-16 rounded-full bg-emerald-500 flex items-center justify-center shadow-lg shadow-emerald-500/20 animate-scale-up">
-                    <svg className="w-9 h-9 text-slate-955" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="3">
+              <div className="flex-1 flex flex-col justify-between p-6 phone-brand-bg animate-fade-in">
+                <div className="flex-1 flex flex-col items-center justify-center text-center space-y-5">
+                  
+                  {/* Glowing success checkmark */}
+                  <div className="w-18 h-18 rounded-full bg-emerald-500 flex items-center justify-center shadow-lg shadow-emerald-500/35 animate-laser-pulse">
+                    <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="3.5">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                     </svg>
                   </div>
 
                   <div>
-                    <span className="text-[10px] font-extrabold text-emerald-500 uppercase tracking-widest block">Transaksi Sukses</span>
-                    <h4 className="text-xl font-black text-slate-900 mt-1">{formatRupiah(lastTxResult.amount)}</h4>
+                    <span className="text-[10px] font-black text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full uppercase tracking-wider block inline-block">Transaksi Sukses</span>
+                    <h4 className="text-2xl font-black text-slate-900 mt-3 font-mono">{formatRupiah(lastTxResult.amount)}</h4>
                   </div>
 
-                  <div className="w-full p-4 rounded-xl bg-slate-50 border border-slate-200 text-left text-[11px] space-y-2">
+                  {/* Digital Receipt Card (Paper Receipt style) */}
+                  <div className="w-full bg-white rounded-3xl border border-slate-150 p-5 text-left text-xs font-semibold text-slate-700 space-y-3.5 shadow-xl relative overflow-hidden card-shadow">
+                    <div className="absolute top-0 left-0 right-0 h-1 bg-[#30009F]"></div>
+                    
                     <div className="flex justify-between">
-                      <span className="text-slate-500 font-semibold">Tujuan</span>
-                      <span className="text-slate-900 font-bold">{lastTxResult.title}</span>
+                      <span className="text-slate-400 font-bold">Tujuan</span>
+                      <span className="text-slate-850 font-black text-right">{lastTxResult.title}</span>
                     </div>
                     {lastTxResult.recipient && (
                       <div className="flex justify-between">
-                        <span className="text-slate-500 font-semibold">No. Penerima/Ref</span>
-                        <span className="text-slate-900 font-mono font-bold">{lastTxResult.recipient}</span>
+                        <span className="text-slate-400 font-bold">No. Penerima/Ref</span>
+                        <span className="text-slate-850 font-mono font-black">{lastTxResult.recipient}</span>
                       </div>
                     )}
                     <div className="flex justify-between">
-                      <span className="text-slate-500 font-semibold">Nomor Resi</span>
-                      <span className="text-slate-900 font-mono font-semibold">{lastTxResult.id}</span>
+                      <span className="text-slate-400 font-bold">Nomor Resi</span>
+                      <span className="text-slate-850 font-mono font-bold">{lastTxResult.id}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-500 font-semibold">Tanggal</span>
-                      <span className="text-slate-900 font-bold">
+                      <span className="text-slate-400 font-bold">Tanggal</span>
+                      <span className="text-slate-850 font-black">
                         {new Date(lastTxResult.date).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}
                       </span>
                     </div>
+                    
                     {lastTxResult.note && lastTxResult.note.includes("ATM") && (
-                      <div className="p-2 rounded bg-yellow-500/10 border border-yellow-500/20 text-center mt-2 space-y-1">
-                        <span className="block text-[9px] text-slate-500 uppercase font-bold tracking-wider">Kode Token ATM</span>
-                        <span className="block text-2xl font-black font-mono text-[#002060] tracking-widest">
+                      <div className="p-3.5 rounded-2xl bg-[#E3CDFF]/30 border border-[#E3CDFF]/75 text-center mt-2.5 space-y-1.5 shadow-2xs">
+                        <span className="block text-[9px] text-[#30009F] uppercase font-black tracking-widest">Kode Penarikan ATM</span>
+                        <span className="block text-3xl font-black font-mono text-[#30009F] tracking-widest leading-none">
                           {Math.floor(100000 + Math.random() * 900000)}
                         </span>
-                        <span className="block text-[8px] text-slate-400">Gunakan di ATM Centurion, berlaku 5 menit</span>
+                        <span className="block text-[9px] text-slate-500 font-semibold">Tunjukkan di mesin ATM Centurion terdekat, berlaku 5 menit</span>
                       </div>
                     )}
-                    <div className="flex justify-between border-t border-slate-200 pt-2 font-bold">
-                      <span className="text-slate-500">Total Transaksi</span>
-                      <span className="text-[#002060] font-mono">{formatRupiah(lastTxResult.total)}</span>
+                    
+                    <div className="border-t border-dashed border-slate-200 pt-3 flex justify-between items-center font-black">
+                      <span className="text-slate-500 text-xs">Total Transaksi</span>
+                      <span className="text-[#30009F] font-mono text-sm">{formatRupiah(lastTxResult.total)}</span>
                     </div>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 mt-4">
+                <div className="grid grid-cols-2 gap-3 mt-6">
                   <button 
                     onClick={() => { playSound("click"); pushNotification("Resi PDF berhasil disimpan!"); }}
-                    className="py-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-700 text-xs font-bold active:scale-95"
+                    className="py-3.5 rounded-xl border border-slate-200 bg-white text-slate-700 text-xs font-black active:scale-95 cursor-pointer shadow-xs"
                   >
                     Simpan Resi
                   </button>
@@ -2303,9 +2761,9 @@ export default function Home() {
                       setScannedCard(null);
                       setCurrentScreen("dashboard");
                     }}
-                    className="py-3 rounded-xl bg-[#002060] text-white text-xs font-extrabold active:scale-95"
+                    className="py-3.5 rounded-xl bg-[#30009F] hover:bg-[#1e0064] text-white text-xs font-black active:scale-95 cursor-pointer shadow-md glow-violet"
                   >
-                    Kembali
+                    Kembali Ke Beranda
                   </button>
                 </div>
               </div>
@@ -2317,11 +2775,11 @@ export default function Home() {
                 <div className="flex items-center gap-2">
                   <button 
                     onClick={() => { playSound("click"); setCurrentScreen("dashboard"); }}
-                    className="text-lg p-1 font-bold text-[#002060]"
+                    className="text-lg p-1 font-bold text-[#30009F]"
                   >
                     &larr;
                   </button>
-                  <h3 className="text-base font-bold text-[#002060]">Layanan QRIS</h3>
+                  <h3 className="text-base font-bold text-[#30009F]">Layanan QRIS</h3>
                 </div>
 
                 <div className="grid grid-cols-4 gap-1 p-1 rounded-xl bg-slate-100 border border-slate-200">
@@ -2330,7 +2788,7 @@ export default function Home() {
                       key={mode}
                       onClick={() => { playSound("click"); setFormInputs({ ...formInputs, qrisMode: mode }); }}
                       className={`py-1.5 text-[9px] font-extrabold rounded-lg transition-all ${
-                        (formInputs.qrisMode || "Scan") === mode ? "bg-[#002060] text-white shadow" : "text-slate-500"
+                        (formInputs.qrisMode || "Scan") === mode ? "bg-[#30009F] text-white shadow" : "text-slate-500"
                       }`}
                     >
                       {mode}
@@ -2356,14 +2814,14 @@ export default function Home() {
                           className="p-3 text-left rounded-xl bg-slate-50 border border-slate-250 active:scale-95"
                         >
                           <span className="text-xs font-bold block text-slate-800">Kopi Kenangan</span>
-                          <span className="text-[9px] text-[#002060] font-mono block mt-0.5">Rp 32.000</span>
+                          <span className="text-[9px] text-[#30009F] font-mono block mt-0.5">Rp 32.000</span>
                         </button>
                         <button 
                           onClick={() => triggerDemoQRScan("Super Indo", 145000)}
                           className="p-3 text-left rounded-xl bg-slate-50 border border-slate-250 active:scale-95"
                         >
                           <span className="text-xs font-bold block text-slate-800">Super Indo</span>
-                          <span className="text-[9px] text-[#002060] font-mono block mt-0.5">Rp 145.000</span>
+                          <span className="text-[9px] text-[#30009F] font-mono block mt-0.5">Rp 145.000</span>
                         </button>
                       </div>
                     </div>
@@ -2425,7 +2883,7 @@ export default function Home() {
                           fee: 0
                         });
                       }}
-                      className="w-full h-10 rounded-lg bg-[#002060] text-white text-xs font-bold flex items-center justify-center active:scale-95"
+                      className="w-full h-10 rounded-lg bg-[#30009F] text-white text-xs font-bold flex items-center justify-center active:scale-95"
                     >
                       Kirim Saldo QRIS
                     </button>
@@ -2435,9 +2893,9 @@ export default function Home() {
                 {/* QRIS TAP MODE (NFC PAY TERMINAL) */}
                 {formInputs.qrisMode === "Tap" && (
                   <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-6">
-                    <div className="relative w-28 h-28 rounded-full bg-[#002060]/5 flex items-center justify-center">
+                    <div className="relative w-28 h-28 rounded-full bg-[#30009F]/5 flex items-center justify-center">
                       <span className="text-3xl">🛜</span>
-                      <div className="absolute inset-0 rounded-full border-2 border-[#002060]/40 animate-nfc-pulse"></div>
+                      <div className="absolute inset-0 rounded-full border-2 border-[#30009F]/40 animate-nfc-pulse"></div>
                     </div>
                     
                     <div className="space-y-2">
@@ -2456,7 +2914,7 @@ export default function Home() {
                           fee: 0
                         });
                       }}
-                      className="w-full py-2.5 rounded-lg bg-[#002060] text-white text-xs font-bold active:scale-95"
+                      className="w-full py-2.5 rounded-lg bg-[#30009F] text-white text-xs font-bold active:scale-95"
                     >
                       Dekatkan Ke Terminal Pembayaran
                     </button>
@@ -2466,59 +2924,204 @@ export default function Home() {
               </div>
             )}
 
+            {/* NOTIFICATION CENTER SCREEN */}
+            {currentScreen === "notifications_list" && loggedInUser && (
+              <div className="flex-1 flex flex-col p-5 animate-fade-in space-y-4">
+                <div className="flex items-center gap-2 border-b border-slate-100 pb-2">
+                  <button 
+                    onClick={() => { playSound("click"); setCurrentScreen("dashboard"); }}
+                    className="text-lg p-1 font-bold text-[#30009F]"
+                  >
+                    &larr;
+                  </button>
+                  <h3 className="text-base font-black text-[#30009F]">Notifikasi</h3>
+                </div>
+
+                <div className="space-y-3 flex-1 overflow-y-auto no-scrollbar">
+                  <div className="p-3.5 bg-[#E3CDFF]/15 border border-[#E3CDFF]/40 rounded-2xl flex gap-3">
+                    <img src="/asset/notification-violet.png" className="w-6 h-6 shrink-0" alt="Notification" />
+                    <div>
+                      <span className="text-[11px] font-black text-[#30009F]">Sistem Keamanan Terverifikasi</span>
+                      <p className="text-xs text-slate-700 font-semibold mt-1">Akun Anda tersinkronisasi aman dengan database PostgreSQL Neon.</p>
+                      <span className="text-[9px] text-slate-450 font-mono block mt-1.5">Hari ini, Baru saja</span>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 bg-[#E3CDFF]/15 border border-[#E3CDFF]/40 rounded-2xl flex gap-3">
+                    <img src="/asset/notification-violet.png" className="w-6 h-6 shrink-0" alt="Notification" />
+                    <div>
+                      <span className="text-[11px] font-black text-[#30009F]">Promo Kenangan Bulan Ini</span>
+                      <p className="text-xs text-slate-700 font-semibold mt-1">Gunakan QRIS Centra untuk mendapatkan diskon 50% di Kopi Kenangan terdekat.</p>
+                      <span className="text-[9px] text-slate-450 font-mono block mt-1.5">Kemarin, 14:22</span>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex gap-3 opacity-60">
+                    <img src="/asset/notification-violet.png" className="w-6 h-6 shrink-0" alt="Notification" />
+                    <div>
+                      <span className="text-[11px] font-black text-slate-700">Registrasi Berhasil</span>
+                      <p className="text-xs text-slate-700 mt-1">Selamat bergabung di Centra Mobile Banking oleh PT Centurion Bank.</p>
+                      <span className="text-[9px] text-slate-450 font-mono block mt-1.5">22 Juni 2026, 09:15</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* PROFILE VIEW SCREEN */}
+            {currentScreen === "profile_view" && loggedInUser && (
+              <div className="flex-1 flex flex-col p-5 animate-fade-in justify-between">
+                <div className="space-y-6">
+                  <div className="flex items-center gap-2 border-b border-slate-100 pb-2">
+                    <button 
+                      onClick={() => { playSound("click"); setCurrentScreen("dashboard"); }}
+                      className="text-lg p-1 font-bold text-[#30009F]"
+                    >
+                      &larr;
+                    </button>
+                    <h3 className="text-base font-black text-[#30009F]">Profil Saya</h3>
+                  </div>
+
+                  {/* Profile Card details */}
+                  <div className="p-5 rounded-3xl bg-[#E3CDFF]/30 border border-[#E3CDFF]/70 text-slate-800 space-y-4 text-center">
+                    <div className="w-20 h-20 rounded-full bg-[#30009F] text-white font-black text-3xl flex items-center justify-center mx-auto shadow-md border-3 border-white">
+                      {loggedInUser.name.slice(0, 2).toUpperCase()}
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-black text-slate-900">{loggedInUser.name}</h4>
+                      <span className="text-[10px] font-black text-[#30009F] bg-[#E3CDFF] px-2.5 py-0.5 rounded-full border border-[#E3CDFF]/60 uppercase tracking-widest mt-1 inline-block">Nasabah Platinum</span>
+                    </div>
+                    <div className="text-left space-y-2 border-t border-[#E3CDFF]/65 pt-3 text-xs font-semibold text-slate-700">
+                      <div className="flex justify-between">
+                        <span>User ID:</span>
+                        <span className="font-bold text-slate-900">{loggedInUser.userId}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>No. Rekening:</span>
+                        <span className="font-mono font-bold text-slate-900">{loggedInUser.accountNo}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Usia:</span>
+                        <span className="font-bold text-slate-900">{loggedInUser.age} tahun</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Accessibility settings */}
+                  <div className="p-4 bg-white border border-slate-150 rounded-2xl space-y-3.5 shadow-2xs">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-455 block">Pengaturan Aksesibilitas</span>
+                    <div className="flex justify-between items-center text-xs font-bold text-slate-750">
+                      <span>Mode Lansia (Teks Besar & Mudah):</span>
+                      <button 
+                        onClick={() => {
+                          playSound("click");
+                          setForceElderlyMode(!forceElderlyMode);
+                          pushNotification(forceElderlyMode ? "Mode Lansia dinonaktifkan." : "Mode Lansia diaktifkan.");
+                        }}
+                        className={`px-3 py-1.5 rounded-xl font-black text-[10px] uppercase border transition-all cursor-pointer ${
+                          forceElderlyMode 
+                            ? "bg-[#FFCDF7] text-[#30009F] border-[#FFCDF7]" 
+                            : "bg-slate-100 text-slate-650 border-slate-200"
+                        }`}
+                      >
+                        {forceElderlyMode ? "AKTIF" : "NONAKTIF"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={() => {
+                    playSound("click");
+                    setLoggedInUser(null);
+                    setCurrentScreen("login");
+                    pushNotification("Sesi Anda ditutup.");
+                  }}
+                  className="w-full py-3.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black active:scale-95 flex items-center justify-center gap-2 cursor-pointer shadow-md transition-all"
+                >
+                  <img src="/asset/logout-pink.png" className="w-4.5 h-4.5" alt="Logout" />
+                  <span>KELUAR DARI REKENING</span>
+                </button>
+              </div>
+            )}
+
           </div>
 
           {/* Bottom Navigation */}
           {currentScreen !== "splash" && currentScreen !== "login" && currentScreen !== "biometric_modal" && currentScreen !== "pin_modal" && loggedInUser && (
-            <div className="h-14 px-4 border-t border-slate-200 bg-white grid grid-cols-5 gap-1 items-center z-30 shrink-0">
+            <div className="h-16 px-2 border-t border-slate-100 bg-white grid grid-cols-5 gap-1 items-center z-30 shrink-0 shadow-lg">
+              
+              {/* Beranda */}
               <button 
                 onClick={() => { playSound("click"); setCurrentScreen("dashboard"); }}
-                className={`flex flex-col items-center justify-center gap-0.5 ${currentScreen === "dashboard" ? "text-[#002060]" : "text-slate-450"}`}
+                className="flex flex-col items-center justify-center gap-1 active:scale-95 cursor-pointer"
               >
-                <span className="text-base">🏠</span>
-                <span className="text-[8px] font-bold">Beranda</span>
+                <img 
+                  src={currentScreen === "dashboard" ? "/asset/beranda-violet.png" : "/asset/beranda-lilac.png"} 
+                  className="w-6.5 h-6.5" 
+                  alt="Beranda" 
+                />
+                <span className={`text-[10px] font-black tracking-tight ${currentScreen === "dashboard" ? "text-[#30009F]" : "text-slate-400"}`}>Beranda</span>
               </button>
               
+              {/* Riwayat Transaksi */}
               <button 
-                onClick={() => { playSound("click"); setSelectedCategory("Transfer"); setCurrentScreen("feature_sheet"); }}
-                className={`flex flex-col items-center justify-center gap-0.5 ${currentScreen === "feature_sheet" && selectedCategory === "Transfer" ? "text-[#002060]" : "text-slate-450"}`}
+                onClick={() => { 
+                  playSound("click"); 
+                  setSelectedCategory("Rekening Koran"); 
+                  setSelectedSubFeature("Rekening Koran"); 
+                  setFormInputs({ month: "Juni 2026" }); 
+                  setCurrentScreen("feature_detail"); 
+                }}
+                className="flex flex-col items-center justify-center gap-1 active:scale-95 cursor-pointer"
               >
-                <span className="text-base">📤</span>
-                <span className="text-[8px] font-bold">Transfer</span>
+                <img 
+                  src={(currentScreen === "feature_detail" && selectedSubFeature === "Rekening Koran") || currentScreen === "estatement_view" ? "/asset/riwayat-violet.png" : "/asset/riwayat-lilac.png"} 
+                  className="w-6.5 h-6.5" 
+                  alt="Riwayat" 
+                />
+                <span className={`text-[10px] font-black tracking-tight ${(currentScreen === "feature_detail" && selectedSubFeature === "Rekening Koran") || currentScreen === "estatement_view" ? "text-[#30009F]" : "text-slate-400"}`}>Riwayat</span>
               </button>
 
-              {/* Centered QRIS circular button */}
+              {/* QRIS Scanner */}
               <button 
                 onClick={() => { playSound("click"); setFormInputs({ qrisMode: "Scan" }); setCurrentScreen("qris"); }}
-                className="flex flex-col items-center justify-center -mt-5 z-40 active:scale-105 transition-transform"
+                className="flex flex-col items-center justify-center gap-1 active:scale-95 cursor-pointer"
               >
-                <div className="w-10 h-10 rounded-full bg-[#002060] flex items-center justify-center shadow-lg border-2 border-white text-white text-sm">
-                  📷
-                </div>
-                <span className="text-[8px] font-bold text-slate-500 mt-1">QRIS</span>
+                <img 
+                  src={currentScreen === "qris" ? "/asset/qris-violet.png" : "/asset/qris-lilac.png"} 
+                  className="w-6.5 h-6.5" 
+                  alt="QRIS" 
+                />
+                <span className={`text-[10px] font-black tracking-tight ${currentScreen === "qris" ? "text-[#30009F]" : "text-slate-400"}`}>QRIS</span>
               </button>
 
+              {/* Notifikasi */}
               <button 
-                onClick={() => {
-                  playSound("click");
-                  setSelectedCategory("Rekening Koran");
-                  setSelectedSubFeature("Rekening Koran");
-                  setFormInputs({ month: "Juni 2026" });
-                  setCurrentScreen("feature_detail");
-                }}
-                className={`flex flex-col items-center justify-center gap-0.5 ${currentScreen === "feature_detail" && selectedSubFeature === "Rekening Koran" ? "text-[#002060]" : "text-slate-450"}`}
+                onClick={() => { playSound("click"); setCurrentScreen("notifications_list"); }}
+                className="flex flex-col items-center justify-center gap-1 active:scale-95 cursor-pointer"
               >
-                <span className="text-base">📄</span>
-                <span className="text-[8px] font-bold">E-Statement</span>
+                <img 
+                  src={currentScreen === "notifications_list" ? "/asset/notification-violet.png" : "/asset/notification-lilac.png"} 
+                  className="w-6.5 h-6.5" 
+                  alt="Notifikasi" 
+                />
+                <span className={`text-[10px] font-black tracking-tight ${currentScreen === "notifications_list" ? "text-[#30009F]" : "text-slate-400"}`}>Notifikasi</span>
               </button>
               
+              {/* Profil */}
               <button 
-                onClick={() => { playSound("click"); setLoggedInUser(null); setCurrentScreen("login"); pushNotification("Sesi Anda ditutup."); }}
-                className="flex flex-col items-center justify-center gap-0.5 text-slate-400"
+                onClick={() => { playSound("click"); setCurrentScreen("profile_view"); }}
+                className="flex flex-col items-center justify-center gap-1 active:scale-95 cursor-pointer"
               >
-                <span className="text-base">👤</span>
-                <span className="text-[8px] font-bold">Keluar</span>
+                <img 
+                  src={currentScreen === "profile_view" ? "/asset/profil-violet.png" : "/asset/profil-lilac.png"} 
+                  className="w-6.5 h-6.5" 
+                  alt="Profil" 
+                />
+                <span className={`text-[10px] font-black tracking-tight ${currentScreen === "profile_view" ? "text-[#30009F]" : "text-slate-400"}`}>Profil</span>
               </button>
+
             </div>
           )}
 

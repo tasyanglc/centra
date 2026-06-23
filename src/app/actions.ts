@@ -308,3 +308,87 @@ export async function fetchEstatementAction(userId: string, month: string) {
     return { success: false, error: "Gagal memproses e-statement dari database." };
   }
 }
+
+// 7. Register a new user and generate a unique account number
+interface RegisterPayload {
+  userId: string;
+  name: string;
+  passcode: string;
+  pin: string;
+  birthDate: string;
+  initialDeposit: number;
+}
+
+export async function registerUserAction(payload: RegisterPayload) {
+  try {
+    const formattedId = payload.userId.trim().toUpperCase();
+    
+    // Check if user_id already exists
+    const existingUser = await sql`
+      SELECT id FROM users WHERE user_id = ${formattedId}
+    `;
+    if (existingUser.length > 0) {
+      return { success: false, error: "User ID / Kode Akses sudah digunakan." };
+    }
+
+    // Generate a unique 10-digit account number (starting with 8029 like other Centra accounts)
+    let accountNo = "";
+    let isUnique = false;
+    let attempts = 0;
+    while (!isUnique && attempts < 15) {
+      const randDigits = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
+      accountNo = `8029 ${randDigits.slice(0, 3)} ${randDigits.slice(3)}`;
+      
+      const checkAcc = await sql`
+        SELECT id FROM users WHERE account_no = ${accountNo}
+      `;
+      if (checkAcc.length === 0) {
+        isUnique = true;
+      }
+      attempts++;
+    }
+
+    if (!isUnique) {
+      return { success: false, error: "Gagal membuat nomor rekening unik. Silakan coba lagi." };
+    }
+
+    // Insert new user into database
+    await sql`
+      INSERT INTO users (user_id, name, passcode, pin, birth_date, balance, account_no)
+      VALUES (
+        ${formattedId},
+        ${payload.name},
+        ${payload.passcode},
+        ${payload.pin},
+        ${payload.birthDate},
+        ${payload.initialDeposit},
+        ${accountNo}
+      )
+    `;
+
+    // Create an initial deposit transaction
+    const txId = `TX-REG-${Math.floor(100000 + Math.random() * 900000)}`;
+    await sql`
+      INSERT INTO transactions (id, user_id, type, title, category, amount, date, note)
+      VALUES (
+        ${txId},
+        ${formattedId},
+        'credit',
+        'Setoran Awal Buka Rekening',
+        'Lainnya',
+        ${payload.initialDeposit},
+        NOW(),
+        'Pembukaan Rekening Baru Centra Mobile'
+      )
+    `;
+
+    return { 
+      success: true, 
+      accountNo, 
+      userId: formattedId 
+    };
+  } catch (err: any) {
+    console.error("RegisterUserAction failed:", err);
+    return { success: false, error: "Gagal membuka rekening baru di database." };
+  }
+}
