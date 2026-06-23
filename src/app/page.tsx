@@ -114,6 +114,12 @@ export default function Home() {
     initialDeposit: 100000
   });
   const [regResult, setRegResult] = useState<{ accountNo: string; userId: string } | null>(null);
+  const [regOtpInput, setRegOtpInput] = useState<string>("");
+  const [regOtpSentVia, setRegOtpSentVia] = useState<"SMS" | "WhatsApp">("SMS");
+  const [regOtpTimer, setRegOtpTimer] = useState<number>(30);
+
+  // --- Lansia Walkthrough Guide ---
+  const [lansiaGuideStep, setLansiaGuideStep] = useState<number>(1);
 
   const playSound = (type: "click" | "success" | "error" | "biometric") => {
     if (!soundEnabled) return;
@@ -198,6 +204,17 @@ export default function Home() {
       return () => clearTimeout(timer);
     }
   }, [currentScreen]);
+
+  // OTP Countdown Timer
+  useEffect(() => {
+    let interval: any;
+    if (currentScreen === "buka_rekening" && regStep === 4 && regOtpTimer > 0) {
+      interval = setInterval(() => {
+        setRegOtpTimer((prev) => prev - 1);
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [currentScreen, regStep, regOtpTimer]);
 
   // Formatter for Rupiah
   const formatRupiah = (val: number) => {
@@ -324,6 +341,15 @@ export default function Home() {
 
     setIsLoading(true);
     try {
+      if (pinPayload.isSimulatedFailure) {
+        // Simulate a network delay and failure verification
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        playSound("error");
+        pushNotification("⚠️ Transaksi GAGAL karena gangguan jaringan. Sistem Audit mendeteksi gangguan. Saldo Anda aman (Auto-Reversal Berhasil).");
+        setCurrentScreen("dashboard");
+        return;
+      }
+
       // Call server action to apply transaction in PostgreSQL
       const res = await createTransactionAction(loggedInUser.userId, {
         id: pinPayload.id,
@@ -484,6 +510,20 @@ export default function Home() {
       fee: 0,
       note: "Pembayaran QRIS Centra",
       recipient: merchant
+    });
+  };
+
+  const triggerDemoQRScanFailed = (merchant: string, amount: number) => {
+    playSound("biometric");
+    launchPinValidation("qris", {
+      id: `QR-${Math.floor(100000 + Math.random() * 900000)}`,
+      type: "debit",
+      title: `QRIS ${merchant}`,
+      amount: amount,
+      fee: 0,
+      note: "Simulasi Transaksi QRIS Gagal",
+      recipient: merchant,
+      isSimulatedFailure: true
     });
   };
 
@@ -727,7 +767,9 @@ export default function Home() {
               <>
                 {/* 3A: INTERFACE MODE LANSIA (ELDERLY MODE - AGE 55+) */}
                 {forceElderlyMode ? (
-                  <div className="flex-1 flex flex-col animate-fade-in justify-between bg-[#E3CDFF]/30">
+                  <div className="flex-1 flex flex-col animate-fade-in justify-between bg-[#E3CDFF]/30 relative">
+                    
+                    
                     
                     {/* Top portion on light purple */}
                     <div className="p-6 pb-4 space-y-4">
@@ -830,18 +872,30 @@ export default function Home() {
                       </div>
 
                       {/* Developer Toggle back to standard view */}
-                      <div className="flex justify-between items-center text-[11px] font-bold text-slate-400 border-t border-slate-100 pt-4">
+                      <div className="flex justify-between items-center text-[11px] font-bold text-slate-450 border-t border-slate-100 pt-4">
                         <span>Usia Anda: {loggedInUser.age} tahun</span>
-                        <button 
-                          onClick={() => {
-                            playSound("click");
-                            setForceElderlyMode(false);
-                            pushNotification("Kembali ke tampilan standar.");
-                          }}
-                          className="text-[#30009F] font-black underline cursor-pointer"
-                        >
-                          Paksa Mode Standar
-                        </button>
+                        <div className="flex gap-3">
+                          <button 
+                            onClick={() => {
+                              playSound("click");
+                              setLansiaGuideStep(1);
+                              pushNotification("Memulai panduan interaktif Lansia.");
+                            }}
+                            className="text-[#30009F] font-black underline cursor-pointer"
+                          >
+                            📖 Panduan
+                          </button>
+                          <button 
+                            onClick={() => {
+                              playSound("click");
+                              setForceElderlyMode(false);
+                              pushNotification("Kembali ke tampilan standar.");
+                            }}
+                            className="text-slate-500 font-bold underline cursor-pointer"
+                          >
+                            Mode Standar
+                          </button>
+                        </div>
                       </div>
                     </div>
 
@@ -2237,7 +2291,7 @@ export default function Home() {
               <div className="flex-1 flex flex-col justify-between p-6 phone-brand-bg animate-fade-in">
                 {/* Header */}
                 <div className="flex items-center gap-3 border-b border-[#E3CDFF]/30 pb-3 mt-4">
-                  {regStep < 4 && (
+                  {regStep < 5 && (
                     <button 
                       onClick={() => {
                         playSound("click");
@@ -2259,20 +2313,21 @@ export default function Home() {
                 </div>
 
                 {/* Step Indicator (Progress Bar) */}
-                {regStep < 4 && (
+                {regStep < 5 && (
                   <div className="mt-4 space-y-2">
                     <div className="flex justify-between items-center text-[10px] font-black text-[#30009F] uppercase tracking-wider">
-                      <span>Langkah {regStep} dari 3</span>
+                      <span>Langkah {regStep} dari 4</span>
                       <span>
                         {regStep === 1 && "Verifikasi Identitas"}
                         {regStep === 2 && "Pembuatan Akun"}
                         {regStep === 3 && "Keamanan & Setoran"}
+                        {regStep === 4 && "Verifikasi OTP"}
                       </span>
                     </div>
                     <div className="h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
                       <div 
                         className="h-full bg-gradient-to-r from-[#30009F] to-[#FFCDF7] transition-all duration-300"
-                        style={{ width: `${(regStep / 3) * 100}%` }}
+                        style={{ width: `${(regStep / 4) * 100}%` }}
                       ></div>
                     </div>
                   </div>
@@ -2464,10 +2519,95 @@ export default function Home() {
                           Kembali
                         </button>
                         <button 
-                          onClick={async () => {
+                          onClick={() => {
                             playSound("click");
                             if (regInputs.pin.length !== 6) {
                               pushNotification("PIN transaksi harus tepat 6 digit angka!");
+                              return;
+                            }
+                            // Transition to OTP verification step
+                            setRegOtpTimer(30);
+                            setRegOtpSentVia("SMS");
+                            setRegOtpInput("");
+                            setRegStep(4);
+                            pushNotification("Kode OTP berhasil dikirim via SMS!");
+                          }}
+                          className="flex-1 h-11 rounded-xl bg-[#30009F] text-white font-black text-xs hover:bg-[#1e0064] transition-all flex items-center justify-center active:scale-95 cursor-pointer shadow-md"
+                        >
+                          Lanjutkan (Verifikasi OTP)
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* STEP 4: OTP VERIFICATION */}
+                  {regStep === 4 && (
+                    <div className="space-y-4 bg-white/80 backdrop-blur-md p-5 rounded-3xl border border-white shadow-xl card-shadow">
+                      <div className="text-center pb-2 border-b border-slate-100">
+                        <span className="text-2xl">🛡️</span>
+                        <h4 className="text-sm font-black text-slate-800 mt-1">Verifikasi OTP</h4>
+                        <p className="text-[10px] text-slate-505 font-semibold leading-tight">
+                          Kode verifikasi telah dikirim ke nomor Anda melalui <span className="font-extrabold text-[#30009F]">{regOtpSentVia}</span>
+                        </p>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-[10px] font-black uppercase tracking-wider text-slate-655 mb-1.5 text-center">Masukkan Kode OTP (6 Digit)</label>
+                          <input 
+                            type="text" 
+                            maxLength={6}
+                            placeholder="Contoh: 123456"
+                            value={regOtpInput}
+                            onChange={(e) => setRegOtpInput(e.target.value.replace(/[^0-9]/g, ""))}
+                            className="w-full h-11 px-3.5 rounded-xl border border-slate-200 bg-slate-50/50 font-bold text-lg focus:outline-none focus:ring-2 focus:ring-[#30009F] text-slate-800 font-mono tracking-widest text-center"
+                          />
+                        </div>
+
+                        <div className="text-center text-xs font-semibold text-slate-500">
+                          {regOtpTimer > 0 ? (
+                            <span>Kirim ulang kode dalam <span className="font-bold text-[#30009F]">{regOtpTimer} detik</span></span>
+                          ) : (
+                            <div className="flex flex-col gap-2">
+                              <button
+                                onClick={() => {
+                                  playSound("click");
+                                  setRegOtpTimer(30);
+                                  pushNotification(`OTP dikirim ulang via ${regOtpSentVia}!`);
+                                }}
+                                className="text-xs font-black text-[#30009F] underline cursor-pointer"
+                              >
+                                Kirim Ulang OTP (SMS)
+                              </button>
+                              
+                              <button
+                                onClick={() => {
+                                  playSound("click");
+                                  setRegOtpSentVia("WhatsApp");
+                                  setRegOtpTimer(30);
+                                  pushNotification("OTP dialihkan dan dikirim via WhatsApp!");
+                                }}
+                                className="text-xs font-black text-emerald-600 hover:text-emerald-700 underline cursor-pointer flex items-center justify-center gap-1"
+                              >
+                                💬 Kirim OTP via WhatsApp (Fallback Jaringan)
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex gap-2.5 mt-4">
+                        <button 
+                          onClick={() => { playSound("click"); setRegStep(3); }}
+                          className="w-1/3 h-11 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 font-black text-xs transition-all flex items-center justify-center active:scale-95 cursor-pointer"
+                        >
+                          Kembali
+                        </button>
+                        <button 
+                          onClick={async () => {
+                            playSound("click");
+                            if (regOtpInput.length !== 6) {
+                              pushNotification("Kode OTP harus 6 digit angka!");
                               return;
                             }
                             
@@ -2477,7 +2617,7 @@ export default function Home() {
                               if (res.success && res.accountNo) {
                                 playSound("success");
                                 setRegResult({ accountNo: res.accountNo, userId: res.userId });
-                                setRegStep(4);
+                                setRegStep(5);
                                 pushNotification("Rekening Baru Berhasil Dibuka!");
                               } else {
                                 playSound("error");
@@ -2493,7 +2633,7 @@ export default function Home() {
                           }}
                           className="flex-1 h-11 rounded-xl bg-[#30009F] text-white font-black text-xs hover:bg-[#1e0064] transition-all flex items-center justify-center active:scale-95 cursor-pointer shadow-md"
                         >
-                          Buka Rekening
+                          Verifikasi &amp; Buka Akun
                         </button>
                       </div>
                     </div>
@@ -2501,8 +2641,8 @@ export default function Home() {
 
                 </div>
 
-                {/* STEP 4: SUCCESS REGISTRATION SCREEN */}
-                {regStep === 4 && regResult && (
+                {/* STEP 5: SUCCESS REGISTRATION SCREEN */}
+                {regStep === 5 && regResult && (
                   <div className="flex-1 flex flex-col justify-between my-4 animate-fade-in">
                     <div className="flex-1 flex flex-col items-center justify-center text-center px-4">
                       
@@ -2560,7 +2700,7 @@ export default function Home() {
                 )}
 
                 {/* Footer brand info */}
-                {regStep < 4 && (
+                {regStep < 5 && (
                   <div className="text-center text-[9px] text-slate-400 font-bold border-t border-slate-100 pt-3">
                     Centra Mobile Onboarding System &bull; &copy; 2026 PT Centurion Bank Tbk.
                   </div>
@@ -2811,17 +2951,28 @@ export default function Home() {
                       <div className="grid grid-cols-2 gap-2">
                         <button 
                           onClick={() => triggerDemoQRScan("Kopi Kenangan", 32000)}
-                          className="p-3 text-left rounded-xl bg-slate-50 border border-slate-250 active:scale-95"
+                          className="p-3 text-left rounded-xl bg-slate-50 border border-slate-250 active:scale-95 cursor-pointer"
                         >
                           <span className="text-xs font-bold block text-slate-800">Kopi Kenangan</span>
                           <span className="text-[9px] text-[#30009F] font-mono block mt-0.5">Rp 32.000</span>
                         </button>
                         <button 
                           onClick={() => triggerDemoQRScan("Super Indo", 145000)}
-                          className="p-3 text-left rounded-xl bg-slate-50 border border-slate-250 active:scale-95"
+                          className="p-3 text-left rounded-xl bg-slate-50 border border-slate-250 active:scale-95 cursor-pointer"
                         >
                           <span className="text-xs font-bold block text-slate-800">Super Indo</span>
                           <span className="text-[9px] text-[#30009F] font-mono block mt-0.5">Rp 145.000</span>
+                        </button>
+                        
+                        <button 
+                          onClick={() => triggerDemoQRScanFailed("Warung Padang (Simulasi Gagal)", 25000)}
+                          className="p-3 text-left rounded-xl bg-rose-50 border border-rose-250 active:scale-95 col-span-2 flex items-center justify-between cursor-pointer"
+                        >
+                          <div>
+                            <span className="text-xs font-bold block text-rose-800">⚠️ Warung Padang (Simulasi Koneksi Buruk)</span>
+                            <span className="text-[9px] text-rose-600 block mt-0.5">Saldo terproteksi dari pemotongan ganda</span>
+                          </div>
+                          <span className="text-[10px] font-mono font-black text-rose-800 bg-rose-200/50 px-2 py-1 rounded">Rp 25.000</span>
                         </button>
                       </div>
                     </div>
@@ -3122,6 +3273,63 @@ export default function Home() {
                 <span className={`text-[10px] font-black tracking-tight ${currentScreen === "profile_view" ? "text-[#30009F]" : "text-slate-400"}`}>Profil</span>
               </button>
 
+            </div>
+          )}
+
+          {/* Interactive Walkthrough / Guide for Elderly Users (Rendered on App Shell level to float on top of Bottom Navigation) */}
+          {currentScreen === "dashboard" && loggedInUser && forceElderlyMode && lansiaGuideStep > 0 && lansiaGuideStep <= 3 && (
+            <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs z-45 flex flex-col justify-end p-6 pb-24">
+              <div className="bg-white rounded-3xl p-5 shadow-2xl space-y-4 border border-[#E3CDFF] animate-fade-in text-slate-800">
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] font-black text-[#30009F] tracking-wide uppercase bg-[#E3CDFF]/45 px-2.5 py-1 rounded-full">
+                    💡 Panduan Langkah {lansiaGuideStep} dari 3
+                  </span>
+                  <button 
+                    onClick={() => { playSound("click"); setLansiaGuideStep(0); }}
+                    className="text-xs text-slate-450 hover:text-slate-650 font-bold cursor-pointer"
+                  >
+                    Lewati
+                  </button>
+                </div>
+                
+                <div className="space-y-1.5 text-left">
+                  <h4 className="text-sm font-black text-slate-850">
+                    {lansiaGuideStep === 1 && "Selamat Datang di Mode Lansia"}
+                    {lansiaGuideStep === 2 && "Kirim Uang dengan Mudah"}
+                    {lansiaGuideStep === 3 && "Hubungi CS Darurat Lansia"}
+                  </h4>
+                  <p className="text-xs text-slate-600 leading-relaxed font-semibold">
+                    {lansiaGuideStep === 1 && "Mode ini dirancang khusus untuk mempermudah Ibu/Bapak mengakses layanan perbankan dengan teks yang besar dan navigasi sederhana."}
+                    {lansiaGuideStep === 2 && "Tombol di sebelah kiri memiliki gambar dan tulisan yang besar untuk mempermudah pengiriman uang tanpa perlu mencari menu yang rumit."}
+                    {lansiaGuideStep === 3 && "Jika Ibu/Bapak mengalami kesulitan, cukup klik tombol merah di bawah untuk langsung terhubung dengan bantuan darurat kami."}
+                  </p>
+                </div>
+
+                <div className="flex gap-2 justify-end pt-2">
+                  {lansiaGuideStep > 1 && (
+                    <button 
+                      onClick={() => { playSound("click"); setLansiaGuideStep(lansiaGuideStep - 1); }}
+                      className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black cursor-pointer active:scale-95 transition-transform"
+                    >
+                      Kembali
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => {
+                      playSound("click");
+                      if (lansiaGuideStep < 3) {
+                        setLansiaGuideStep(lansiaGuideStep + 1);
+                      } else {
+                        setLansiaGuideStep(0);
+                        pushNotification("Panduan selesai. Anda siap menggunakan Mode Lansia!");
+                      }
+                    }}
+                    className="px-5 py-2 rounded-xl bg-[#30009F] hover:bg-[#1e0064] text-white text-xs font-black shadow-md cursor-pointer active:scale-95 transition-transform"
+                  >
+                    {lansiaGuideStep === 3 ? "Selesai & Mulai" : "Lanjut"}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
