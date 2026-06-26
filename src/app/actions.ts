@@ -1,7 +1,3 @@
-"use server";
-
-import { sql } from "@/lib/db";
-
 interface TxPayload {
   id: string;
   type: "debit" | "credit";
@@ -22,24 +18,92 @@ interface PotPayload {
   date: string;
 }
 
+interface RegisterPayload {
+  userId: string;
+  name: string;
+  passcode: string;
+  pin: string;
+  birthDate: string;
+  initialDeposit: number;
+}
+
+// Helper to fetch and save data in browser's localStorage
+function getLocalData() {
+  if (typeof window === "undefined") {
+    return {
+      users: [],
+      transactions: [],
+      centra_pots: []
+    };
+  }
+
+  // Seed default data if not present
+  if (!window.localStorage.getItem("centra_users")) {
+    const defaultUsers = [
+      {
+        id: 1,
+        user_id: "AMINAH28",
+        name: "Aminah",
+        passcode: "2hanima8*",
+        pin: "789632",
+        birth_date: "2006-05-28",
+        balance: 500000,
+        account_no: "2410512131"
+      }
+    ];
+    window.localStorage.setItem("centra_users", JSON.stringify(defaultUsers));
+  }
+
+  if (!window.localStorage.getItem("centra_transactions")) {
+    const defaultTransactions = [
+      {
+        id: "TX-INIT-001",
+        user_id: "AMINAH28",
+        type: "credit",
+        title: "Setoran Awal",
+        category: "Lainnya",
+        amount: 500000,
+        date: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        note: "Pembukaan Rekening Centra"
+      }
+    ];
+    window.localStorage.setItem("centra_transactions", JSON.stringify(defaultTransactions));
+  }
+
+  if (!window.localStorage.getItem("centra_pots")) {
+    window.localStorage.setItem("centra_pots", JSON.stringify([]));
+  }
+
+  return {
+    users: JSON.parse(window.localStorage.getItem("centra_users") || "[]"),
+    transactions: JSON.parse(window.localStorage.getItem("centra_transactions") || "[]"),
+    centra_pots: JSON.parse(window.localStorage.getItem("centra_pots") || "[]")
+  };
+}
+
+function saveLocalData(data: { users?: any[]; transactions?: any[]; centra_pots?: any[] }) {
+  if (typeof window === "undefined") return;
+  if (data.users) window.localStorage.setItem("centra_users", JSON.stringify(data.users));
+  if (data.transactions) window.localStorage.setItem("centra_transactions", JSON.stringify(data.transactions));
+  if (data.centra_pots) window.localStorage.setItem("centra_pots", JSON.stringify(data.centra_pots));
+}
+
 // 1. Authenticate user & check age
 export async function loginAction(userIdInput: string, passcode: string) {
   try {
     const formattedId = userIdInput.trim().toUpperCase();
-    const rows = await sql`
-      SELECT * FROM users WHERE user_id = ${formattedId}
-    `;
+    const { users } = getLocalData();
+    const user = users.find((u: any) => u.user_id === formattedId);
 
-    if (rows.length === 0) {
+    if (!user) {
       return { success: false, error: "User ID tidak ditemukan" };
     }
 
-    const user = rows[0];
     if (user.passcode !== passcode) {
       return { success: false, error: "Kata sandi salah" };
     }
 
-    // Calculate age to check if user is 55+ (for future elderly layout trigger)
+    // Calculate age to check if user is 55+
     const birthDate = new Date(user.birth_date);
     const today = new Date();
     let age = today.getFullYear() - birthDate.getFullYear();
@@ -55,7 +119,7 @@ export async function loginAction(userIdInput: string, passcode: string) {
         name: user.name,
         accountNo: user.account_no,
         balance: Number(user.balance),
-        birthDate: user.birth_date.toISOString().split("T")[0],
+        birthDate: new Date(user.birth_date).toISOString().split("T")[0],
         age: age,
         isElderly: age >= 55,
         pin: user.pin
@@ -63,7 +127,7 @@ export async function loginAction(userIdInput: string, passcode: string) {
     };
   } catch (err: any) {
     console.error("LoginAction failed:", err);
-    return { success: false, error: "Terjadi kesalahan pada server database." };
+    return { success: false, error: "Terjadi kesalahan pada server lokal." };
   }
 }
 
@@ -71,50 +135,42 @@ export async function loginAction(userIdInput: string, passcode: string) {
 export async function fetchUserDataAction(userId: string) {
   try {
     const formattedId = userId.trim().toUpperCase();
+    const { users, transactions: allTx, centra_pots: allPots } = getLocalData();
     
-    // Balance
-    const userRows = await sql`
-      SELECT balance FROM users WHERE user_id = ${formattedId}
-    `;
-    if (userRows.length === 0) {
+    const user = users.find((u: any) => u.user_id === formattedId);
+    if (!user) {
       return { success: false, error: "User tidak ditemukan" };
     }
-    const balance = Number(userRows[0].balance);
+    const balance = Number(user.balance);
 
-    // Transactions
-    const txRows = await sql`
-      SELECT id, type, title, category, amount, date, note, recipient, bank_name 
-      FROM transactions 
-      WHERE user_id = ${formattedId} 
-      ORDER BY date DESC
-    `;
-    const transactions = txRows.map((t) => ({
-      id: t.id,
-      type: t.type as "debit" | "credit",
-      title: t.title,
-      category: t.category,
-      amount: Number(t.amount),
-      date: t.date.toISOString(),
-      note: t.note || undefined,
-      recipient: t.recipient || undefined,
-      bankName: t.bank_name || undefined
-    }));
+    // Transactions sorted by date DESC
+    const transactions = allTx
+      .filter((t: any) => t.user_id === formattedId)
+      .map((t: any) => ({
+        id: t.id,
+        type: t.type as "debit" | "credit",
+        title: t.title,
+        category: t.category,
+        amount: Number(t.amount),
+        date: new Date(t.date).toISOString(),
+        note: t.note || undefined,
+        recipient: t.recipient || undefined,
+        bankName: t.bank_name || undefined
+      }))
+      .sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
-    // CentraPots
-    const potRows = await sql`
-      SELECT id, title, target, current, category, date 
-      FROM centra_pots 
-      WHERE user_id = ${formattedId} 
-      ORDER BY date ASC
-    `;
-    const centraPots = potRows.map((p) => ({
-      id: p.id,
-      title: p.title,
-      target: Number(p.target),
-      current: Number(p.current),
-      category: p.category,
-      date: p.date.toISOString().split("T")[0]
-    }));
+    // CentraPots sorted by date ASC
+    const centraPots = allPots
+      .filter((p: any) => p.user_id === formattedId)
+      .map((p: any) => ({
+        id: p.id,
+        title: p.title,
+        target: Number(p.target),
+        current: Number(p.current),
+        category: p.category,
+        date: new Date(p.date).toISOString().split("T")[0]
+      }))
+      .sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
     return {
       success: true,
@@ -124,7 +180,7 @@ export async function fetchUserDataAction(userId: string) {
     };
   } catch (err: any) {
     console.error("FetchUserDataAction failed:", err);
-    return { success: false, error: "Gagal mengambil data dari database." };
+    return { success: false, error: "Gagal mengambil data dari penyimpanan lokal." };
   }
 }
 
@@ -132,15 +188,14 @@ export async function fetchUserDataAction(userId: string) {
 export async function createTransactionAction(userId: string, tx: TxPayload) {
   try {
     const formattedId = userId.trim().toUpperCase();
+    const { users, transactions } = getLocalData();
     
-    const userRows = await sql`
-      SELECT balance FROM users WHERE user_id = ${formattedId}
-    `;
-    if (userRows.length === 0) {
+    const userIndex = users.findIndex((u: any) => u.user_id === formattedId);
+    if (userIndex === -1) {
       return { success: false, error: "User tidak ditemukan" };
     }
     
-    const currentBalance = Number(userRows[0].balance);
+    const currentBalance = Number(users[userIndex].balance);
     const fee = tx.fee || 0;
 
     if (tx.type === "debit") {
@@ -148,42 +203,31 @@ export async function createTransactionAction(userId: string, tx: TxPayload) {
       if (currentBalance < totalDeduction) {
         return { success: false, error: "Saldo Anda tidak mencukupi." };
       }
-      // Deduct balance
-      await sql`
-        UPDATE users 
-        SET balance = balance - ${totalDeduction} 
-        WHERE user_id = ${formattedId}
-      `;
+      users[userIndex].balance = currentBalance - totalDeduction;
     } else {
-      // Credit (e.g. Setor Tunai)
-      await sql`
-        UPDATE users 
-        SET balance = balance + ${tx.amount} 
-        WHERE user_id = ${formattedId}
-      `;
+      users[userIndex].balance = currentBalance + tx.amount;
     }
 
-    // Insert transaction
-    await sql`
-      INSERT INTO transactions (id, user_id, type, title, category, amount, date, note, recipient, bank_name)
-      VALUES (
-        ${tx.id}, 
-        ${formattedId}, 
-        ${tx.type}, 
-        ${tx.title}, 
-        ${tx.category}, 
-        ${tx.amount}, 
-        NOW(), 
-        ${tx.note || null}, 
-        ${tx.recipient || null}, 
-        ${tx.bankName || null}
-      )
-    `;
+    const newTx = {
+      id: tx.id,
+      user_id: formattedId,
+      type: tx.type,
+      title: tx.title,
+      category: tx.category,
+      amount: tx.amount,
+      date: new Date().toISOString(),
+      note: tx.note || null,
+      recipient: tx.recipient || null,
+      bank_name: tx.bankName || null
+    };
 
+    transactions.push(newTx);
+
+    saveLocalData({ users, transactions });
     return { success: true };
   } catch (err) {
     console.error("CreateTransactionAction failed:", err);
-    return { success: false, error: "Gagal memproses transaksi di database." };
+    return { success: false, error: "Gagal memproses transaksi di penyimpanan lokal." };
   }
 }
 
@@ -191,16 +235,25 @@ export async function createTransactionAction(userId: string, tx: TxPayload) {
 export async function createPotAction(userId: string, pot: PotPayload) {
   try {
     const formattedId = userId.trim().toUpperCase();
+    const { centra_pots } = getLocalData();
     
-    await sql`
-      INSERT INTO centra_pots (id, user_id, title, target, current, category, date)
-      VALUES (${pot.id}, ${formattedId}, ${pot.title}, ${pot.target}, 0, ${pot.category}, ${pot.date})
-    `;
-    
+    const newPot = {
+      id: pot.id,
+      user_id: formattedId,
+      title: pot.title,
+      target: pot.target,
+      current: 0,
+      category: pot.category,
+      date: pot.date
+    };
+
+    centra_pots.push(newPot);
+
+    saveLocalData({ centra_pots });
     return { success: true };
   } catch (err) {
     console.error("CreatePotAction failed:", err);
-    return { success: false, error: "Gagal membuat CentraPot di database." };
+    return { success: false, error: "Gagal membuat CentraPot di penyimpanan lokal." };
   }
 }
 
@@ -208,48 +261,42 @@ export async function createPotAction(userId: string, pot: PotPayload) {
 export async function topUpEMoneyAction(userId: string, amount: number, cardNo: string, cardType: string) {
   try {
     const formattedId = userId.trim().toUpperCase();
+    const { users, transactions } = getLocalData();
     
-    const userRows = await sql`
-      SELECT balance FROM users WHERE user_id = ${formattedId}
-    `;
-    if (userRows.length === 0) {
+    const userIndex = users.findIndex((u: any) => u.user_id === formattedId);
+    if (userIndex === -1) {
       return { success: false, error: "User tidak ditemukan" };
     }
 
-    const currentBalance = Number(userRows[0].balance);
+    const currentBalance = Number(users[userIndex].balance);
     if (currentBalance < amount) {
       return { success: false, error: "Saldo Anda tidak mencukupi." };
     }
 
     const txId = `TX-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    // Deduct balance
-    await sql`
-      UPDATE users 
-      SET balance = balance - ${amount} 
-      WHERE user_id = ${formattedId}
-    `;
+    users[userIndex].balance = currentBalance - amount;
 
-    // Insert transaction
-    await sql`
-      INSERT INTO transactions (id, user_id, type, title, category, amount, date, note, recipient)
-      VALUES (
-        ${txId}, 
-        ${formattedId}, 
-        'debit', 
-        ${`Top Up ${cardType}`}, 
-        'Keuangan', 
-        ${amount}, 
-        NOW(), 
-        ${`NFC Top Up ${cardNo}`}, 
-        ${cardNo}
-      )
-    `;
+    const newTx = {
+      id: txId,
+      user_id: formattedId,
+      type: "debit",
+      title: `Top Up ${cardType}`,
+      category: "Keuangan",
+      amount: amount,
+      date: new Date().toISOString(),
+      note: `NFC Top Up ${cardNo}`,
+      recipient: cardNo,
+      bank_name: null
+    };
 
+    transactions.push(newTx);
+
+    saveLocalData({ users, transactions });
     return { success: true };
   } catch (err) {
     console.error("TopUpEMoneyAction failed:", err);
-    return { success: false, error: "Gagal memproses top up e-money di database." };
+    return { success: false, error: "Gagal memproses top up e-money di penyimpanan lokal." };
   }
 }
 
@@ -257,16 +304,14 @@ export async function topUpEMoneyAction(userId: string, amount: number, cardNo: 
 export async function fetchEstatementAction(userId: string, month: string) {
   try {
     const formattedId = userId.trim().toUpperCase();
+    const { transactions: allTx } = getLocalData();
     
-    const txRows = await sql`
-      SELECT type, title, category, amount, date, note, recipient 
-      FROM transactions 
-      WHERE user_id = ${formattedId} 
-      ORDER BY date DESC
-    `;
+    const txRows = allTx
+      .filter((t: any) => t.user_id === formattedId)
+      .sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
     const monthLower = month.toLowerCase();
-    const filteredTxs = txRows.filter((t) => {
+    const filteredTxs = txRows.filter((t: any) => {
       const d = new Date(t.date);
       const monthNames = [
         "januari", "februari", "maret", "april", "mei", "juni", 
@@ -277,19 +322,19 @@ export async function fetchEstatementAction(userId: string, month: string) {
       return monthLower.includes(nameMatch) && monthLower.includes(yearMatch);
     });
 
-    const transactions = filteredTxs.map((t) => ({
+    const transactions = filteredTxs.map((t: any) => ({
       type: t.type as "debit" | "credit",
       title: t.title,
       category: t.category,
       amount: Number(t.amount),
-      date: t.date.toISOString(),
+      date: new Date(t.date).toISOString(),
       note: t.note || undefined,
       recipient: t.recipient || undefined
     }));
 
     let totalDebit = 0;
     let totalCredit = 0;
-    transactions.forEach((t) => {
+    transactions.forEach((t: any) => {
       if (t.type === "debit") {
         totalDebit += t.amount;
       } else {
@@ -305,33 +350,21 @@ export async function fetchEstatementAction(userId: string, month: string) {
     };
   } catch (err) {
     console.error("FetchEstatementAction failed:", err);
-    return { success: false, error: "Gagal memproses e-statement dari database." };
+    return { success: false, error: "Gagal memproses e-statement." };
   }
 }
 
 // 7. Register a new user and generate a unique account number
-interface RegisterPayload {
-  userId: string;
-  name: string;
-  passcode: string;
-  pin: string;
-  birthDate: string;
-  initialDeposit: number;
-}
-
 export async function registerUserAction(payload: RegisterPayload) {
   try {
     const formattedId = payload.userId.trim().toUpperCase();
+    const { users, transactions } = getLocalData();
     
-    // Check if user_id already exists
-    const existingUser = await sql`
-      SELECT id FROM users WHERE user_id = ${formattedId}
-    `;
-    if (existingUser.length > 0) {
+    const existingUser = users.find((u: any) => u.user_id === formattedId);
+    if (existingUser) {
       return { success: false, error: "User ID / Kode Akses sudah digunakan." };
     }
 
-    // Generate a unique 10-digit account number (starting with 8029 like other Centra accounts)
     let accountNo = "";
     let isUnique = false;
     let attempts = 0;
@@ -339,10 +372,8 @@ export async function registerUserAction(payload: RegisterPayload) {
       const randDigits = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
       accountNo = `8029 ${randDigits.slice(0, 3)} ${randDigits.slice(3)}`;
       
-      const checkAcc = await sql`
-        SELECT id FROM users WHERE account_no = ${accountNo}
-      `;
-      if (checkAcc.length === 0) {
+      const checkAcc = users.find((u: any) => u.account_no === accountNo);
+      if (!checkAcc) {
         isUnique = true;
       }
       attempts++;
@@ -352,35 +383,36 @@ export async function registerUserAction(payload: RegisterPayload) {
       return { success: false, error: "Gagal membuat nomor rekening unik. Silakan coba lagi." };
     }
 
-    // Insert new user into database
-    await sql`
-      INSERT INTO users (user_id, name, passcode, pin, birth_date, balance, account_no)
-      VALUES (
-        ${formattedId},
-        ${payload.name},
-        ${payload.passcode},
-        ${payload.pin},
-        ${payload.birthDate},
-        ${payload.initialDeposit},
-        ${accountNo}
-      )
-    `;
+    const newUser = {
+      id: users.length + 1,
+      user_id: formattedId,
+      name: payload.name,
+      passcode: payload.passcode,
+      pin: payload.pin,
+      birth_date: payload.birthDate,
+      balance: payload.initialDeposit,
+      account_no: accountNo
+    };
 
-    // Create an initial deposit transaction
+    users.push(newUser);
+
     const txId = `TX-REG-${Math.floor(100000 + Math.random() * 900000)}`;
-    await sql`
-      INSERT INTO transactions (id, user_id, type, title, category, amount, date, note)
-      VALUES (
-        ${txId},
-        ${formattedId},
-        'credit',
-        'Setoran Awal Buka Rekening',
-        'Lainnya',
-        ${payload.initialDeposit},
-        NOW(),
-        'Pembukaan Rekening Baru Centra Mobile'
-      )
-    `;
+    const newTx = {
+      id: txId,
+      user_id: formattedId,
+      type: "credit",
+      title: "Setoran Awal Buka Rekening",
+      category: "Lainnya",
+      amount: payload.initialDeposit,
+      date: new Date().toISOString(),
+      note: "Pembukaan Rekening Baru Centra Mobile",
+      recipient: null,
+      bank_name: null
+    };
+
+    transactions.push(newTx);
+
+    saveLocalData({ users, transactions });
 
     return { 
       success: true, 
@@ -389,53 +421,53 @@ export async function registerUserAction(payload: RegisterPayload) {
     };
   } catch (err: any) {
     console.error("RegisterUserAction failed:", err);
-    return { success: false, error: "Gagal membuka rekening baru di database." };
+    return { success: false, error: "Gagal membuka rekening baru." };
   }
 }
 
-// 8. Update User PIN in PostgreSQL
+// 8. Update User PIN
 export async function updateUserPinAction(userId: string, oldPin: string, newPin: string) {
   try {
     const formattedId = userId.trim().toUpperCase();
-    const rows = await sql`
-      SELECT pin FROM users WHERE user_id = ${formattedId}
-    `;
-    if (rows.length === 0) {
+    const { users } = getLocalData();
+    
+    const userIndex = users.findIndex((u: any) => u.user_id === formattedId);
+    if (userIndex === -1) {
       return { success: false, error: "User tidak ditemukan" };
     }
-    if (rows[0].pin !== oldPin) {
+    if (users[userIndex].pin !== oldPin) {
       return { success: false, error: "PIN lama salah!" };
     }
-    await sql`
-      UPDATE users SET pin = ${newPin} WHERE user_id = ${formattedId}
-    `;
+    
+    users[userIndex].pin = newPin;
+    saveLocalData({ users });
     return { success: true };
   } catch (err) {
     console.error("UpdateUserPinAction failed:", err);
-    return { success: false, error: "Gagal memperbarui PIN di database." };
+    return { success: false, error: "Gagal memperbarui PIN." };
   }
 }
 
-// 9. Update User Passcode (Kata Sandi) in PostgreSQL
+// 9. Update User Passcode (Kata Sandi)
 export async function updateUserPasscodeAction(userId: string, oldPasscode: string, newPasscode: string) {
   try {
     const formattedId = userId.trim().toUpperCase();
-    const rows = await sql`
-      SELECT passcode FROM users WHERE user_id = ${formattedId}
-    `;
-    if (rows.length === 0) {
+    const { users } = getLocalData();
+    
+    const userIndex = users.findIndex((u: any) => u.user_id === formattedId);
+    if (userIndex === -1) {
       return { success: false, error: "User tidak ditemukan" };
     }
-    if (rows[0].passcode !== oldPasscode) {
+    if (users[userIndex].passcode !== oldPasscode) {
       return { success: false, error: "Kata sandi lama salah!" };
     }
-    await sql`
-      UPDATE users SET passcode = ${newPasscode} WHERE user_id = ${formattedId}
-    `;
+    
+    users[userIndex].passcode = newPasscode;
+    saveLocalData({ users });
     return { success: true };
   } catch (err) {
     console.error("UpdateUserPasscodeAction failed:", err);
-    return { success: false, error: "Gagal memperbarui kata sandi di database." };
+    return { success: false, error: "Gagal memperbarui kata sandi." };
   }
 }
 

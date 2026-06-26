@@ -1,7 +1,6 @@
-import { neon } from "@neondatabase/serverless";
-
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL is not set in environment variables.");
-}
-
-export const sql = neon(process.env.DATABASE_URL);
+// Database is fully client-side using localStorage in actions.ts.
+// This file is kept as a dummy to prevent any broken import references.
+export const sql = async (...args: any[]) => {
+  console.warn("SQL was called on client-side dummy db.ts", args);
+  return [];
+};
